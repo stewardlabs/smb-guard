@@ -1,6 +1,6 @@
 # 고장 모델
 
-SMB 로 마운트한 작업 디렉터리가 망가지는 경로를 6개 층으로 정리했다. 각 층은 **독립적으로
+SMB 로 마운트한 작업 디렉터리가 망가지는 경로를 7개 층으로 정리했다. 각 층은 **독립적으로
 발현**하며 증상이 서로 비슷해 오진하기 쉽다. 처방도 층마다 다르다.
 
 이 문서의 근거는 전부 실측이다 — `fs_usage` 추적, 통합 로그(`log show`), 게스트 저널,
@@ -352,5 +352,5 @@ log stream --predicate 'subsystem == "com.apple.DesktopServices"' --info
 안 된다", "저장이 안 된다")이 7개 원인에서 나온다**는 뜻이다. 그래서 판정을 1차 증거로 해야 한다 —
 mount 테이블, 에러 코드, 저널, DiskArbitration 로그.
 
-관련 문서: [decisions.md](decisions.md) 의 설계 원칙 27개는 이 모델을 규명하는 과정에서
+관련 문서: [decisions.md](decisions.md) 의 설계 원칙 28개는 이 모델을 규명하는 과정에서
 얻은 것이다. [operations.md](operations.md) 에 각 층의 관찰 채널이 정리되어 있다.
