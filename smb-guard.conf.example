@@ -36,8 +36,21 @@ SMBG_MP="/opt/workspace"
 #   sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <이 값> 'date +%s'
 SMBG_HOST="fileserver"
 
-# SMB 공유명. Samba 의 [섹션명] 이자 마운트 URL 의 경로 성분이다.
+# SMB 공유명. Samba 의 [섹션명] 이자 마운트 URL 의 첫 경로 성분이다.
 SMBG_SHARE="workspace"
+
+# 마운트 URL 에서 공유명 뒤에 붙는 경로 (선택, 기본 없음).
+#
+# **공유 루트를 워크스페이스보다 한 단계 위에 두는 배치에서 쓴다.** Samba 는 파일 삭제
+# 시 대체 데이터 스트림을 지우며 basename 을 공유 루트 기준으로 해석하는 결함이 있어,
+# 공유 루트에 있는 이름과 같은 basename 을 가진 기존 파일은 트리 어디에서도 덮어쓰거나
+# 지울 수 없다. `.git/config` 가 여기 걸려 git 이 깨진다(docs/failure-model.md).
+#
+# 공유 루트를 올리고 그 하위 디렉터리를 마운트하면 충돌 집합이 비고, 클라이언트에서
+# 보이는 레이아웃은 그대로다. 게스트측 SMBG_EXPORT_ROOT 와 짝을 이룬다.
+#   SMBG_SHARE="ws" + SMBG_SHARE_SUBPATH="workspace"
+#     → //계정@호스트/ws/workspace  (공유 루트는 게스트의 /srv/ws)
+#SMBG_SHARE_SUBPATH="workspace"
 
 # SMB 인증 계정. 로컬 소유자 계정과 다르면 여기에 적는다(미설정 시 SMBG_OWNER 와 같다).
 # 마운트 소유자 판정은 SMBG_OWNER 로, 서버 인증은 이 값으로 한다 — 둘을 섞으면
@@ -48,9 +61,24 @@ SMBG_SHARE="workspace"
 # 필수 — 게스트(Linux, Samba 서버측)
 #===============================================================================
 
-# 게스트 안에서의 워크스페이스 실경로. Samba 의 `path` 이자 잔재 정리 대상 루트다.
+# 게스트 안에서의 워크스페이스 실경로. 잔재 정리(깊은 순회)의 대상 루트다.
 # 호스트의 SMBG_MP 와 값이 같을 필요는 없다 — 서로 다른 파일시스템의 경로다.
 SMBG_GUEST_ROOT="/srv/workspace"
+
+# Samba 가 내보낼 공유 루트 (선택, 기본값 = SMBG_GUEST_ROOT).
+#
+# 위 SMBG_SHARE_SUBPATH 와 짝이다. **워크스페이스보다 한 단계 위**를 가리키게 하고,
+# 그 아래에 워크스페이스가 보이도록 bind mount 를 걸어 둔다:
+#   sudo install -d -o <소유자> -g <소유자> -m 755 /srv/ws /srv/ws/workspace
+#   echo '/srv/workspace /srv/ws/workspace none bind,x-systemd.requires-mounts-for=/srv/workspace 0 0' \
+#     | sudo tee -a /etc/fstab
+#
+# 여기에는 워크스페이스 외의 것을 두지 말 것 — 공유 루트에 생기는 이름은 그대로
+# "트리 전역에서 치환 불가한 basename" 이 된다.
+#
+# 잔재 정리는 이 경로도 깊이 1 로 훑는다. Finder 가 .Trashes·.Spotlight-V100 등을
+# **마운트된 공유의 루트에** 만들기 때문이다.
+#SMBG_EXPORT_ROOT="/srv/ws"
 
 #===============================================================================
 # 선택 — 기본값으로 충분하면 건드리지 않는다

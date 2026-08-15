@@ -71,15 +71,42 @@ fi
 : "${SMBG_OWNER:?$CONF: SMBG_OWNER 미설정}"
 : "${SMBG_SMB_USER:=$SMBG_OWNER}"
 
-case "$SMBG_GUEST_ROOT$SMBG_SHARE$SMBG_SMB_USER" in
+# SMB 로 내보낼 루트. 워크스페이스 자신이 아니라 **그 상위**를 내보내는 것이 기본
+# 의도다 — Samba 가 파일 삭제 시 스트림을 지우며 basename 을 공유 루트 기준으로
+# 해석하는 결함이 있어, 공유 루트에 있는 이름과 같은 basename 을 가진 파일은
+# 트리 어디에서도 덮어쓰거나 지울 수 없게 된다 (docs/failure-model.md).
+# 미설정 시 워크스페이스 자신으로 폴백한다 — 기존 배포의 동작이 바뀌지 않는다.
+: "${SMBG_EXPORT_ROOT:=$SMBG_GUEST_ROOT}"
+
+case "$SMBG_GUEST_ROOT$SMBG_EXPORT_ROOT$SMBG_SHARE$SMBG_SMB_USER" in
     *"|"*) echo "설정값에 '|' 문자를 쓸 수 없습니다" >&2; exit 78 ;;
 esac
+
+# 클라이언트가 마운트할 하위경로. 호스트측 SMBG_SHARE_SUBPATH 와 **같은 값이어야 한다** —
+# 맥은 //계정@호스트/<공유명>/<이 값> 을 마운트하므로, 서버에 그 경로가 없으면 마운트가
+# 실패한다. 미설정 시 워크스페이스 이름을 기본으로 삼는다.
+: "${SMBG_SHARE_SUBPATH:=$(basename "$SMBG_GUEST_ROOT")}"
+
+# 공유 루트를 올렸다면 워크스페이스가 실제로 그 아래 보여야 한다. 이 레포는 fstab 을
+# 건드리지 않으므로(autofs 를 건드리지 않는 것과 같은 방침) 확인만 하고 안내한다.
+if [ "$SMBG_EXPORT_ROOT" != "$SMBG_GUEST_ROOT" ]; then
+    _leaf="$SMBG_EXPORT_ROOT/$SMBG_SHARE_SUBPATH"
+    if [ ! -d "$_leaf" ]; then
+        echo "!! $_leaf 가 없습니다." >&2
+        echo "   SMBG_EXPORT_ROOT 를 쓰려면 워크스페이스가 그 아래에 보여야 합니다:" >&2
+        echo "     sudo install -d -o $SMBG_OWNER -g $SMBG_OWNER -m 755 $SMBG_EXPORT_ROOT $_leaf" >&2
+        echo "     echo '$SMBG_GUEST_ROOT $_leaf none bind,x-systemd.requires-mounts-for=$SMBG_GUEST_ROOT 0 0' | sudo tee -a /etc/fstab" >&2
+        echo "     sudo systemctl daemon-reload && sudo mount $_leaf" >&2
+        exit 78
+    fi
+fi
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/smb-guard-render.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 
 render() {   # render <템플릿> <출력경로>
     sed -e "s|@GUEST_ROOT@|$SMBG_GUEST_ROOT|g" \
+        -e "s|@EXPORT_ROOT@|$SMBG_EXPORT_ROOT|g" \
         -e "s|@SHARE@|$SMBG_SHARE|g" \
         -e "s|@SMB_USER@|$SMBG_SMB_USER|g" \
         "$1" > "$2"
@@ -107,8 +134,13 @@ cat <<PLAN
   Samba       $( [ "$DO_SAMBA" -eq 1 ] && echo "→ /etc/samba/smb.conf (기존 파일 백업 후 교체)" \
                                        || echo "배치하지 않음 (치환 결과만 출력 — --samba 로 배치)" )
 
-  워크스페이스 $SMBG_GUEST_ROOT
+  워크스페이스 $SMBG_GUEST_ROOT                       (잔재 정리: 전체 순회)
+  공유 루트   $SMBG_EXPORT_ROOT$( [ "$SMBG_EXPORT_ROOT" = "$SMBG_GUEST_ROOT" ] \
+                && echo "  (워크스페이스와 동일 — failure-model.md 층 6 참조)" \
+                || echo "  (잔재 정리: 깊이 1)" )
   공유        [$SMBG_SHARE]  valid users = $SMBG_SMB_USER
+  마운트 URL  //$SMBG_SMB_USER@${SMBG_HOST:-<호스트>}/$SMBG_SHARE$( [ "$SMBG_EXPORT_ROOT" != "$SMBG_GUEST_ROOT" ] && echo "/$SMBG_SHARE_SUBPATH" )
+              (맥의 /etc/auto_smb 가 이 경로와 일치해야 한다)
 PLAN
 
 if [ "$DRY" -eq 1 ]; then

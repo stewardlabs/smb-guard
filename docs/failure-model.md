@@ -231,6 +231,95 @@ testparm -s 2>/dev/null | grep -E '^\s*veto files'    # 0줄이어야 한다
 
 ---
 
+## 층 6 — 공유 루트 이름 충돌
+
+**공유 루트의 엔트리명과 같은 basename 을 가진 기존 파일은, 트리 어디에 있든 덮어쓰거나
+지울 수 없다.** 실패는 `ENOENT` 로 올라온다 — 파일이 분명히 있는데 "없다"고 한다.
+
+2026-08-15 실측(Samba 4.23.6-Ubuntu, macOS 26.6). C 하니스로 조건을 분리하고, 게스트에
+`log level = 10` 계측 smbd 를 별도 포트로 띄워 서버측 흐름을 확보했다.
+
+### 규칙
+
+`rename(A,B)` 덮어쓰기와 `unlink(B)` 가 대상이다. **rename 고유 문제가 아니다.**
+
+| 요인 | 영향 |
+|---|---|
+| `basename(B)` 가 공유 루트 엔트리명과 일치 | **이것이 유일한 갈림길** |
+| B 가 아직 없음 | 성공 (그래서 "처음 한 번은 되고 두 번째부터 실패"로 보인다) |
+| 원본 A 의 이름 | 무관 — 목적지 이름만 문제다 |
+| 깊이 · 숨김 여부 · `O_EXCL` · 파일 크기 · 열린 fd · 프로세스 cwd | 전부 무관 |
+| 대상이 파일이냐 디렉터리냐 | 무관 (둘 다 실패) |
+
+### 원인
+
+Samba 는 파일 삭제 시 `close_remove_share_mode()` → `delete_all_streams()`
+(`source3/smbd/close.c`)로 대체 데이터 스트림을 지운다. 이때 파일을 다시 여는 경로가
+전체 상대경로가 아니라 **basename 만** 써서 **공유 루트 기준으로 해석된다**:
+
+```
+delete_all_streams found 2 streams
+openat_pathref_fsp: smb_fname [config]
+file_name_hash: /opt/stewardlabs/config          ← 실제 대상은 tmp/…/config
+delete_all_streams failed: NT_STATUS_OBJECT_NAME_NOT_FOUND
+```
+
+공유 루트에 같은 이름이 있으면 **엉뚱한 객체**를 열어 스트림 삭제가 실패하고, 없으면
+ENOENT 가 정상 종료로 취급되어 통과한다. 클라이언트는 이 CLOSE 실패를 받고 rename 요청을
+아예 보내지 않는다 — 성공 케이스는 rename 이 2회 기록되는데 실패 케이스는 1회뿐이다.
+
+**스트림은 클라이언트가 아니라 서버의 `vfs_fruit` 가 항상 보고한다**(AFP_AfpInfo /
+AFP_Resource). 그래서 클라이언트 마운트 옵션으로는 못 고친다 — `nostreams`,
+`nomdatacache`, `nodatacache`, `nonotification`, `soft`, `forcenewsession` 전부 무효로
+실측됐다. 공유 루트의 실제 항목은 손상되지 않는다(inode·mtime 불변 확인).
+
+### 왜 치명적인가 — git 이 깨진다
+
+git 의 `lock_file` 은 `X.lock` 에 쓰고 `rename(X.lock, X)` 한다. `.git/config` 의
+basename 이 `config` 이므로, 공유 루트에 `config` 라는 이름이 있으면 **config 가 이미
+존재하는 두 번째 쓰기부터 전부 실패한다.** `git init` 이 36바이트
+(`[core]\n\trepositoryformatversion = 0\n`)에서 멈추는 것이 정확히 이것이다.
+
+`commit`·`push` 의 본작업은 성공하고 config 쓰기만 실패하므로 **부분 성공이라 놓치기
+쉽다**(`push -u` 의 upstream 등록, `worktree add` 의 브랜치 등록). 그리고 실패한 쓰기가
+`.git/config` 를 반쯤 쓰인 상태로 남겨 **손상이 누적된다** — 섹션 헤더와 `remote =` 만
+있고 다음 줄이 공백인 상태가 실제로 발생해 `fatal: bad config line N` 으로 저장소 전체가
+죽었다. 삭제도 config 쓰기이므로 손상은 스스로 회복되지 않는다.
+
+### 판별
+
+`tools/probe-rename-collision.sh` 가 공유 루트의 엔트리 이름으로 덮어쓰기 rename 을 실제로
+시도해 오염된 집합을 뽑는다. 대조군이 함께 돌아가므로 "실패가 0건"이 정상인지 측정 무효인지
+구분된다.
+
+### 처방: 공유 루트를 워크스페이스 상위로 올린다
+
+충돌 집합은 공유 루트의 엔트리 목록이다. **워크스페이스를 직접 내보내면 그 루트의 모든
+이름이 곧 충돌 집합이 된다** — `config`·`docs`·`web` 같은 레포 디렉터리명이 전부 여기
+해당한다. 공유 루트를 한 단계 위로 올리고 그 아래에 워크스페이스만 두면 충돌 집합이
+워크스페이스명 하나로 줄고, git 내부 파일명(`config`·`index`·`HEAD`·`packed-refs`)과
+겹치지 않는다. 클라이언트는 공유의 하위 디렉터리를 마운트하므로 보이는 레이아웃은
+그대로다.
+
+기각한 대안: `fruit:metadata = netatalk` + `streams_xattr` 제거. 스트림 자체를 없애므로
+동작은 하지만 **소파일 생성이 5배 느리고**(150개 기준 2.0s → 10.3s) 파일마다 `._`
+사이드카가 생긴다(150/150). 층 5 가 `._*` 를 회수 대상으로 삼고 있어 잔재량도 그만큼
+늘어난다.
+
+### 부수 효과: 공유 루트를 올리면 잔재도 함께 올라간다
+
+Finder 는 `.Trashes`·`.Spotlight-V100`·`.fseventsd`·`.DS_Store` 를 **마운트된 공유의
+루트에** 만든다. 공유 루트가 곧 워크스페이스이던 시절에는 층 5 의 정리 순회가 자동으로
+이것들을 덮었지만, 공유 루트를 올리면 그곳이 `SMBG_GUEST_ROOT` 밖이 되어 타이머가 영원히
+훑지 않는다. 기능 고장은 아니지만 잔재가 조용히 쌓이고, 특히 `.Trashes` 는 Finder 로 지운
+파일이 회수되지 않은 채 남는다.
+
+그래서 `mac-cruft-cleanup` 이 공유 루트를 **깊이 1** 로 한 번 더 훑는다(`-maxdepth 1`,
+순회 비용 사실상 0). **스크립트만 고치면 안 된다** — 유닛에 `ProtectSystem=strict` 가
+걸려 있어 `ReadWritePaths` 에 공유 루트가 없으면 삭제가 조용히 실패한다. 두 변경이 짝이다.
+
+---
+
 ## 에러 코드 지도
 
 | 증상 | 의미 | 조치 |
@@ -244,6 +333,9 @@ testparm -s 2>/dev/null | grep -E '^\s*veto files'    # 0줄이어야 한다
 | `Too many users` (EUSERS) | 맥 커널 smbfs 세션 잔재 고착 | 알려진 유일한 해법은 서버 재부팅 |
 | Finder `오류 코드 -8062` | 부수 파일 쓰기 실패로 복사 전체 중단 (층 5) | 아래 진단으로 **실패 경로를 실명으로** 확보 |
 | 흐린 폴더 + 재개(⟳), 내부 파일 600 | -8062 중단 후 CopyEngine 이 최종 권한을 입히지 못한 상태 | 고장이 아니라 미완의 흔적. 재개하지 말고 `rm -rf` 후 재복사 |
+| 있는 파일을 덮어쓸 때만 `ENOENT` | 공유 루트 이름 충돌 (층 6) | 그 파일의 basename 이 공유 루트 엔트리명과 같은지 확인. 공유 루트를 워크스페이스 상위로 |
+| `could not write config file .../.git/config` | 상동 — `.git/config` 가 걸린 경우 | `.git/config` 손상 여부를 함께 확인(`fatal: bad config line N`) |
+| `ENOENT: rename '<파일>.tmp.NNN' -> '<파일>'` | 상동 — 원자적 저장을 쓰는 편집기·도구 | 간헐이 아니라 결정적이다. 대상 basename 을 볼 것 |
 
 **-8062 의 1차 증거 채집** — Finder 대화상자는 경로를 알려주지 않는다:
 
@@ -256,8 +348,8 @@ log stream --predicate 'subsystem == "com.apple.DesktopServices"' --info
 
 ## 이 모델을 읽는 법
 
-층이 6개인 것은 증상이 6가지라는 뜻이 아니다. **같은 증상("파일이 안 보인다", "복사가
-안 된다")이 6개 원인에서 나온다**는 뜻이다. 그래서 판정을 1차 증거로 해야 한다 —
+층이 7개인 것은 증상이 7가지라는 뜻이 아니다. **같은 증상("파일이 안 보인다", "복사가
+안 된다", "저장이 안 된다")이 7개 원인에서 나온다**는 뜻이다. 그래서 판정을 1차 증거로 해야 한다 —
 mount 테이블, 에러 코드, 저널, DiskArbitration 로그.
 
 관련 문서: [decisions.md](decisions.md) 의 설계 원칙 27개는 이 모델을 규명하는 과정에서

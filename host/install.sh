@@ -61,8 +61,13 @@ fi
 : "${SMBG_MP:?$CONF: SMBG_MP 미설정}"
 : "${SMBG_HOST:?$CONF: SMBG_HOST 미설정}"
 : "${SMBG_SHARE:?$CONF: SMBG_SHARE 미설정}"
+: "${SMBG_SHARE_SUBPATH:=}"
 : "${SMBG_LABEL_PREFIX:=io.stewardlabs}"
 : "${SMBG_LOGDIR:=/var/log/smb}"
+
+# 배치 계획 출력용. 런타임 조립은 lib/common.sh 가 한다 — 정의를 두 곳에 두지 않도록
+# 여기서는 표시만 하고, 스크립트들은 common.sh 의 값을 쓴다.
+SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
 
 id -u "$SMBG_OWNER" >/dev/null 2>&1 || {
     echo "계정 '$SMBG_OWNER' 이(가) 존재하지 않습니다 ($CONF)" >&2; exit 78; }
@@ -135,7 +140,7 @@ cat <<PLAN
 
   소유자      $SMBG_OWNER (uid $(id -u "$SMBG_OWNER"))
   마운트 지점 $SMBG_MP
-  게스트      $SMBG_HOST : $SMBG_SHARE
+  게스트      $SMBG_HOST : $SMBG_SHARE_PATH
   sleepwatcher $SW
 PLAN
 

@@ -32,9 +32,16 @@
 #   **주의(원칙 25)**: 회수 대상이 없어서 조용한 것과 고장으로 조용한 것은
 #   출력으로 구분되지 않는다. 실증할 때는 대상을 남겨 둔 채 실행할 것.
 #
-# usage: mac-cruft-cleanup [워크스페이스_경로]
-#   경로는 인자 > /etc/smb-guard.conf 의 SMBG_GUEST_ROOT 순으로 결정한다.
+# usage: mac-cruft-cleanup [워크스페이스_경로] [공유루트_경로]
+#   경로는 인자 > /etc/smb-guard.conf 의 SMBG_GUEST_ROOT / SMBG_EXPORT_ROOT 순으로
+#   결정한다.
 #   **기본 경로를 코드에 박지 않는다** — 엉뚱한 트리를 훑고 지우는 것보다 실패가 낫다.
+#
+#   2번째 경로(공유 루트)는 워크스페이스보다 위에 있을 수 있다. Finder 는 잔재를
+#   **마운트된 공유의 루트에** 만들므로, 공유 루트를 올리면 잔재도 함께 올라가
+#   워크스페이스 순회만으로는 닿지 않는다. 그래서 공유 루트는 깊이 1 로 한 번 더
+#   훑는다 — 순회 비용은 사실상 0 이고, 두 값이 같으면(공유 루트를 올리지 않은
+#   기존 배포) 이 스윕은 통째로 건너뛴다.
 #
 #   환경변수(설정 파일보다 우선한다 — 일회성 오버라이드용):
 #     TRASH_AGE_DAYS=7                    .Trashes 유예 기간
@@ -60,10 +67,13 @@ SMBG_CONF="${SMBG_CONF:-/etc/smb-guard.conf}"
 
 ROOT="${1:-${SMBG_GUEST_ROOT:-}}"
 if [ -z "$ROOT" ]; then
-    echo "usage: mac-cruft-cleanup <워크스페이스_경로>" >&2
+    echo "usage: mac-cruft-cleanup <워크스페이스_경로> [공유루트_경로]" >&2
     echo "       (또는 $SMBG_CONF 에 SMBG_GUEST_ROOT 를 설정)" >&2
     exit 2
 fi
+
+# 공유 루트. 미지정이면 워크스페이스 자신으로 폴백하고, 그 경우 아래 4) 는 건너뛴다.
+EXPORT_ROOT="${2:-${SMBG_EXPORT_ROOT:-$ROOT}}"
 
 TRASH_AGE_DAYS="${_env_trash:-${TRASH_AGE_DAYS:-7}}"
 PRUNE_NAMES="${_env_prune:-${PRUNE_NAMES:-.git .Trashes target node_modules}}"
@@ -108,20 +118,54 @@ n_dir=$(find "$ROOT" -xdev "${PRUNE[@]}" \
 #    되돌릴 수 없는 휴지통은 휴지통이 아니다. Finder 의 "휴지통으로 이동"이
 #    사실상의 즉시 삭제가 되면 사용자가 그것을 신뢰할 수 없다 (§8 v17).
 #    mindepth/maxdepth 2 = .Trashes/<uid>/<항목>. uid 디렉터리 자체는 보존한다.
-#    공유 루트가 곧 $ROOT 이므로 Finder 는 여기에만 .Trashes 를 만든다.
-n_trash=0
-if [ -d "$ROOT/.Trashes" ]; then
-    n_trash=$(find "$ROOT/.Trashes" -xdev -mindepth 2 -maxdepth 2 \
+#
+#    **Finder 는 마운트된 공유의 루트에 .Trashes 를 만든다.** 공유 루트가 곧 $ROOT
+#    이던 시절에는 여기만 보면 됐지만, 공유 루트를 워크스페이스 위로 올린 뒤로는
+#    $EXPORT_ROOT 도 함께 봐야 한다 — 그래서 함수로 뽑아 4) 에서 재사용한다.
+trash_sweep() {   # trash_sweep <루트> → 회수 건수를 stdout 으로
+    if [ ! -d "$1/.Trashes" ]; then echo 0; return; fi
+    find "$1/.Trashes" -xdev -mindepth 2 -maxdepth 2 \
         -mtime "+${TRASH_AGE_DAYS}" \
+        -print -exec rm -rf -- '{}' + 2>/dev/null | wc -l
+}
+n_trash=$(trash_sweep "$ROOT")
+
+# 4) 공유 루트 — 깊이 1 만 훑는다.
+#    공유 루트를 올리지 않았다면($EXPORT_ROOT == $ROOT) 위에서 이미 다 훑었으므로
+#    건너뛴다. 중복 삭제는 무해하지만 집계가 이중으로 잡힌다.
+#
+#    -maxdepth 1 이라 순회 비용이 사실상 0 이다. -xdev 는 워크스페이스가 별도
+#    파일시스템으로 bind mount 된 경우 그 경계에서 멈추게 한다 — 깊이 제한과
+#    이중으로 안전장치가 된다.
+#
+#    주의: 이 스윕이 실제로 지우려면 systemd 유닛의 ReadWritePaths 에 공유 루트가
+#    있어야 한다. ProtectSystem=strict 아래에서는 없는 경로가 읽기 전용이고,
+#    삭제 실패는 여기서 조용히 무시된다(2>/dev/null).
+n_export=0
+if [ "$EXPORT_ROOT" != "$ROOT" ] && [ -d "$EXPORT_ROOT" ]; then
+    n_e_file=$(find "$EXPORT_ROOT" -xdev -maxdepth 1 \
+        -type f '(' -name '.DS_Store' -o -name '._*' -o -name '.apdisk' ')' \
+        -print -exec rm -f -- '{}' + 2>/dev/null | wc -l)
+
+    n_e_dir=$(find "$EXPORT_ROOT" -xdev -mindepth 1 -maxdepth 1 \
+        -type d '(' -name '.TemporaryItems' -o -name '.fseventsd' \
+                  -o -name '.Spotlight-V100' -o -name '.DocumentRevisions-V100' \
+                  -o -name '.AppleDouble'    -o -name '.AppleDB' \
+                  -o -name '.AppleDesktop' ')' \
         -print -exec rm -rf -- '{}' + 2>/dev/null | wc -l)
+
+    n_e_trash=$(trash_sweep "$EXPORT_ROOT")
+    n_export=$(( n_e_file + n_e_dir + n_e_trash ))
 fi
 
-total=$(( n_file + n_dir + n_trash ))
+total=$(( n_file + n_dir + n_trash + n_export ))
 
 if [ "$total" -gt 0 ]; then
+    _export_note=""
+    [ "$n_export" -gt 0 ] && _export_note=" / 공유루트 ${n_export} @ ${EXPORT_ROOT}"
     echo "mac-cruft-cleanup: 제거 ${total}건" \
          "(파일 ${n_file} / 디렉터리 ${n_dir} / 휴지통 ${n_trash}, 유예 ${TRASH_AGE_DAYS}일)" \
-         "@ ${ROOT}"
+         "@ ${ROOT}${_export_note}"
 fi
 
 exit 0
