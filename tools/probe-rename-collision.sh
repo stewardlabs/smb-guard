@@ -11,9 +11,15 @@
 # 이 도구가 하는 일: 공유 루트의 엔트리 이름을 게스트에서 받아, 그 이름들로 마운트 위에서
 #       "덮어쓰기 rename" 을 실제로 시도한다. 실패한 이름이 곧 **오염된 basename 집합**이다.
 #
-# 판정:
-#   · 공유 루트를 워크스페이스 상위로 올린 배치라면 → 워크스페이스 이름 하나만 실패해야 한다
-#   · 워크스페이스를 직접 내보내는 배치라면        → 루트의 거의 모든 이름이 실패한다(고장)
+# 판정 (종료 코드):
+#   0 = 정상. 실패가 없거나, 실패한 것이 **기대된 잔여**뿐이다. 공유 루트를 워크스페이스
+#       상위로 올린 배치에서는 워크스페이스 자신의 이름이 반드시 남는다 — 그것은 공유
+#       루트의 정당한 엔트리이기 때문이다
+#   1 = 이상. 그 밖의 이름이 오염됐다. 공유 루트에 무언가 생겼거나(상향 배치), 애초에
+#       워크스페이스를 직접 내보내고 있다(미조치 — 루트의 거의 모든 이름이 실패한다)
+#
+#   기대된 잔여를 오염으로 보고하지 않는 이유: **정상 상태가 매번 경보를 울리면 진짜
+#   이상도 함께 무시된다** (설계 원칙 23).
 #
 # 읽는 법: 실패가 0건이면 스트림이 없거나(서버가 fruit 없이 동작) 이미 해결된 것이다.
 #          **대조군(control) 이 성공해야 측정이 유효하다** — 대조군까지 실패하면 마운트
@@ -36,6 +42,14 @@ CONF="${SMBG_CONF:-/usr/local/etc/smb-guard.conf}"
 : "${SMBG_HOST:?$CONF: SMBG_HOST 미설정}"
 : "${SMBG_GUEST_ROOT:=$SMBG_MP}"
 : "${SMBG_EXPORT_ROOT:=$SMBG_GUEST_ROOT}"
+
+# 기대된 잔여 = 공유 루트 아래에서 클라이언트가 마운트하는 이름(= 워크스페이스 자신).
+# 게스트측 install 과 같은 규칙으로 정한다 — SMBG_SHARE_SUBPATH 가 정본이고, 없으면
+# 워크스페이스 이름을 쓴다. 공유 루트를 올리지 않은 배치에서는 기대된 잔여가 없다.
+EXPECTED=""
+if [ "$SMBG_EXPORT_ROOT" != "$SMBG_GUEST_ROOT" ]; then
+    EXPECTED="${SMBG_SHARE_SUBPATH:-$(basename "$SMBG_GUEST_ROOT")}"
+fi
 
 mount | grep -q " on $SMBG_MP (smbfs" || {
     echo "$SMBG_MP 가 smbfs 로 마운트되어 있지 않습니다 — 먼저 마운트하세요" >&2; exit 1; }
@@ -94,13 +108,18 @@ fi
 echo "대조군 OK — 측정 유효"
 echo
 
-failed=""; n_ok=0; n_fail=0
+unexpected=""; n_ok=0; n_fail=0; n_bad=0
 while IFS= read -r name; do
     [ -n "$name" ] || continue
     if try_name "$name"; then
         n_ok=$((n_ok + 1))
+        continue
+    fi
+    n_fail=$((n_fail + 1))
+    if [ -n "$EXPECTED" ] && [ "$name" = "$EXPECTED" ]; then
+        printf '  FAIL  %-24s (기대된 잔여 — 워크스페이스 자신)\n' "$name"
     else
-        n_fail=$((n_fail + 1)); failed="$failed $name"
+        n_bad=$((n_bad + 1)); unexpected="$unexpected $name"
         printf '  FAIL  %s\n' "$name"
     fi
 done <<EOF
@@ -112,14 +131,19 @@ echo
 # 로케일에서 뒤따르는 멀티바이트 문자의 첫 바이트를 변수명에 포함시켜, `${n_ok}` 가
 # 아니라 `n_ok` + 0xEA 라는 이름을 찾는다. set -u 와 만나면 unbound variable 로 죽는다.
 # LC_ALL=C 에서는 재현되지 않아 로케일이 다른 환경에서만 터진다 — 실제로 그렇게 샜다.
-echo "정상 ${n_ok}건 / 오염 ${n_fail}건"
+echo "정상 ${n_ok}건 / 실패 ${n_fail}건  (기대된 잔여를 뺀 오염 ${n_bad}건)"
 
-if [ "$n_fail" -eq 0 ]; then
-    echo "→ 오염된 이름이 없습니다. 층 6 의 영향을 받지 않는 구성입니다."
+if [ "$n_bad" -eq 0 ]; then
+    if [ "$n_fail" -eq 0 ]; then
+        echo "→ 정상. 오염된 이름이 없습니다 — 공유 루트에 겹치는 이름 자체가 없습니다."
+    else
+        echo "→ 정상. 실패한 것은 기대된 잔여 '${EXPECTED}' 뿐입니다."
+        echo "   공유 루트 상향 배치가 유지되고 있습니다 (failure-model.md 층 6)."
+    fi
     exit 0
 fi
 
-echo "→ 오염된 basename:$failed"
+echo "→ 예기치 않게 오염된 basename:${unexpected}"
 echo "   이 이름을 가진 기존 파일은 트리 어디에서도 덮어쓰거나 지울 수 없습니다."
 if [ "$SMBG_EXPORT_ROOT" = "$SMBG_GUEST_ROOT" ]; then
     echo "   공유 루트가 워크스페이스 자신입니다 — 상위로 올리는 것이 처방입니다"

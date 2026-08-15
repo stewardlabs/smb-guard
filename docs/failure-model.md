@@ -352,5 +352,5 @@ log stream --predicate 'subsystem == "com.apple.DesktopServices"' --info
 안 된다", "저장이 안 된다")이 7개 원인에서 나온다**는 뜻이다. 그래서 판정을 1차 증거로 해야 한다 —
 mount 테이블, 에러 코드, 저널, DiskArbitration 로그.
 
-관련 문서: [decisions.md](decisions.md) 의 설계 원칙 27개는 이 모델을 규명하는 과정에서
+관련 문서: [decisions.md](decisions.md) 의 설계 원칙 28개는 이 모델을 규명하는 과정에서
 얻은 것이다. [operations.md](operations.md) 에 각 층의 관찰 채널이 정리되어 있다.

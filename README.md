@@ -92,7 +92,7 @@ sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'dat
 | [docs/architecture.md](docs/architecture.md) | 구성 전문, 역할 분담, 설계 계약 |
 | [docs/install.md](docs/install.md) | 설치·검증 절차, 수동 배치 대조표 |
 | [docs/operations.md](docs/operations.md) | 관찰 항목과 진단 도구 |
-| [docs/decisions.md](docs/decisions.md) | 결정 기록과 설계 원칙 27개 |
+| [docs/decisions.md](docs/decisions.md) | 결정 기록과 설계 원칙 28개 |
 | [docs/open-questions.md](docs/open-questions.md) | 미결 과제와 잠복 위험 |
 | [docs/history/](docs/history/) | 개발 이력 원장 (실측 로그·기각된 가설 포함) |
 
