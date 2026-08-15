@@ -292,6 +292,33 @@ basename 이 `config` 이므로, 공유 루트에 `config` 라는 이름이 있�
 시도해 오염된 집합을 뽑는다. 대조군이 함께 돌아가므로 "실패가 0건"이 정상인지 측정 무효인지
 구분된다.
 
+### 상류 — Samba 의 회귀이며 master 에서는 고쳐졌다
+
+우리 환경 고유 문제가 아니라 **Samba 의 회귀**다. `09f49fb56a4`(smbd: Simplify
+delete_all_streams())가 `delete_all_streams()` 를 `synthetic_pathref()` 대신
+`synthetic_smb_fname()` 을 쓰도록 바꾸면서, `SMB_VFS_UNLINKAT()` 에 넘기는 base_name 이
+공유 루트 기준이 아니라 **dirfsp 기준**이 되었다. 그런데 `streams_xattr_unlinkat()` 은
+`fsp == NULL` 일 때 여전히 `handle->conn->cwd_fsp`(= 공유 루트)로 pathref 를 만들고 있었다.
+
+| | |
+|---|---|
+| 회귀 도입 | `09f49fb56a4` — smbd: Simplify delete_all_streams() |
+| 수정 | `2fc21d87` — s3:vfs_streams_xattr: Use dirfsp in streams_xattr_unlinkat() (master, 2026-06-16) |
+| 상류 버그 | [16144](https://bugzilla.samba.org/show_bug.cgi?id=16144) |
+| 실측 대상 | 4.23.6-Ubuntu — `v4-23-stable` 소스에 **미반영** 확인 |
+
+수정 커밋의 설명이 우리가 관측한 것과 같다: *"path resolution to fail for files in
+subdirectories, leaving xattr streams intact after an OVERWRITE or OVERWRITE_IF
+disposition."*
+
+**릴리스 브랜치에는 아직 백포트되지 않았다.** 상류 버그는 증상을 `smb2.streams` 자체
+테스트의 실패로 서술하고 있어, **하위 디렉터리의 기존 파일을 덮어쓸 때 클라이언트가
+ENOENT 를 받는 사용자 가시 고장**이라는 점은 드러나 있지 않다 — 우리 쪽 관측이 상류에
+보탤 수 있는 부분이 그것이다.
+
+따라서 아래 처방은 백포트를 기다리는 임시 우회가 아니라 **지금 유효한 처방**이다.
+백포트된 버전으로 올라간 뒤 배치를 되돌릴지는 그때 재검토한다(open-questions.md).
+
 ### 처방: 공유 루트를 워크스페이스 상위로 올린다
 
 충돌 집합은 공유 루트의 엔트리 목록이다. **워크스페이스를 직접 내보내면 그 루트의 모든
