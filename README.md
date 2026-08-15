@@ -24,7 +24,7 @@ SMB 마운트는 "끊어지거나 붙어 있거나" 둘 중 하나가 아니다.
   알려주지 않아 권한·용량 문제로 오진하기 쉽다.
 
 전부 "로그를 안 보면 모르는" 종류다. 자세한 인과와 실측 근거는
-[docs/failure-model.md](docs/failure-model.md) 를 볼 것 — 6개 층으로 정리했다.
+[docs/failure-model.md](docs/failure-model.md) 를 볼 것 — 7개 층으로 정리했다.
 
 ## 무엇을 하는가
 
@@ -88,7 +88,7 @@ sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'dat
 
 | 문서 | 내용 |
 |---|---|
-| [docs/failure-model.md](docs/failure-model.md) | 6층 고장 모델과 에러 코드 지도 — **먼저 읽을 것** |
+| [docs/failure-model.md](docs/failure-model.md) | 7층 고장 모델과 에러 코드 지도 — **먼저 읽을 것** |
 | [docs/architecture.md](docs/architecture.md) | 구성 전문, 역할 분담, 설계 계약 |
 | [docs/install.md](docs/install.md) | 설치·검증 절차, 수동 배치 대조표 |
 | [docs/operations.md](docs/operations.md) | 관찰 항목과 진단 도구 |
