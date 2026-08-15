@@ -88,7 +88,9 @@ mkdir -p "$probe" && chown "$SMBG_OWNER" "$probe"
 
 # 프로브 마운트는 반드시 소유자의 세션 컨텍스트로 — 로그인 키체인의 SMB 자격증명이
 # root 컨텍스트에서는 조회되지 않아, 실제 원인과 무관한 인증 실패로 오진하게 된다.
-err="$(smbg_in_session /sbin/mount_smbfs "//$SMBG_SMB_USER@$SMBG_HOST/$SMBG_SHARE" "$probe" 2>&1)"
+# SMBG_SHARE 가 아니라 SMBG_SHARE_PATH 를 쓴다 — autofs 맵이 마운트하는 것과 같은
+# 경로여야 프로브가 실제 마운트를 대표한다(공유의 하위 디렉터리를 마운트하는 배치).
+err="$(smbg_in_session /sbin/mount_smbfs "//$SMBG_SMB_USER@$SMBG_HOST/$SMBG_SHARE_PATH" "$probe" 2>&1)"
 mount | grep -q " on $probe " && umount "$probe" 2>/dev/null
 rmdir "$probe" 2>/dev/null
 

@@ -68,7 +68,17 @@ SMBG_LOG="$SMBG_LOGDIR/smb-guard.log"       # 4개 스크립트 통합 이벤트
 # 서로 다른 파일시스템의 경로다. 미설정 시 호스트 경로로 폴백한다.
 : "${SMBG_GUEST_ROOT:=$SMBG_MP}"
 
+# 마운트 URL 에서 공유명 뒤에 붙는 경로. 공유 루트를 워크스페이스보다 위로 두는 배치에서
+# **공유의 하위 디렉터리를 마운트**하기 위한 값이다 (게스트측 근거는 smb.conf.in 헤더).
+# 예: SMBG_SHARE=ws, SMBG_SHARE_SUBPATH=stewardlabs → //계정@호스트/ws/stewardlabs
+# 비워 두면 공유 루트를 그대로 마운트한다 — 기존 배포의 동작이 바뀌지 않는다.
+: "${SMBG_SHARE_SUBPATH:=}"
+
 # ── 파생 값 ────────────────────────────────────────────────────────────────
+# 마운트 URL 의 경로부. autofs 맵과 smbfix 의 마운트 프로브가 같은 값을 써야 하므로
+# 여기서 한 번만 조립한다.
+SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
+
 # UID 조회 실패는 "그 계정이 없다"는 뜻이다. 폴백 UID 를 쓰면 무관한 사용자의 자격으로
 # 마운트를 건드리게 되므로 실패시킨다.
 SMBG_OWNER_UID="$(id -u "$SMBG_OWNER" 2>/dev/null)"

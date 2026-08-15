@@ -13,6 +13,18 @@
 
 - Samba, systemd
 - 워크스페이스 경로가 존재할 것
+- **공유 루트를 워크스페이스 상위에 둘 것** (권장 — [failure-model.md](failure-model.md)
+  층 6). `SMBG_EXPORT_ROOT` 아래에 워크스페이스가 보이도록 bind mount 를 걸어 둔다:
+
+  ```bash
+  sudo install -d -o <소유자> -g <소유자> -m 755 /srv/ws /srv/ws/<워크스페이스명>
+  echo '<워크스페이스경로> /srv/ws/<워크스페이스명> none bind,x-systemd.requires-mounts-for=<워크스페이스경로> 0 0' \
+    | sudo tee -a /etc/fstab
+  sudo systemctl daemon-reload && sudo mount /srv/ws/<워크스페이스명>
+  ```
+
+  이 레포는 `/etc/fstab` 을 건드리지 않는다(autofs 를 건드리지 않는 것과 같은 방침).
+  `guest/install.sh` 는 확인만 하고, 없으면 위 명령을 안내하며 멈춘다.
 
 ### autofs 설정 — 이 레포가 건드리지 않는 부분
 
@@ -25,11 +37,21 @@
 
 ```text
 # /etc/auto_smb  (600 root)
-<마운트지점>  -fstype=smbfs,soft  ://<계정>:<URL인코딩비번>@<게스트>/<공유명>
+<마운트지점>  -fstype=smbfs,soft  ://<계정>:<URL인코딩비번>@<게스트>/<공유명>[/<하위경로>]
 ```
 
 `soft` 가 **필수**다. 서버 부재 시 무한 대기 대신 유한 시간 내 실패해야 하며,
 `SMBG_TRIGGER_TIMEOUT` 과 웨이크 훅의 대기 상한이 성립하는 전제다.
+
+`<하위경로>` 는 공유 루트를 워크스페이스 상위에 둔 배치에서 쓴다(`SMBG_SHARE_SUBPATH`).
+**맵을 고치기 전에 수동으로 한 번 확인할 것** — automountd 경유의 하위 디렉터리 마운트는
+`mount_smbfs` 직접 호출만큼 검증되어 있지 않다:
+
+```bash
+mkdir -p /private/tmp/wstest
+mount_smbfs //<계정>@<게스트>/<공유명>/<하위경로> /private/tmp/wstest && ls /private/tmp/wstest
+umount /private/tmp/wstest
+```
 
 ```ini
 # /etc/autofs.conf
