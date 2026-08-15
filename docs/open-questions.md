@@ -42,22 +42,19 @@ git 이 대소문자를 구분하므로 서버도 구분하게 설정했다. 그
 
 ## 미확인
 
-### 층 6 결함이 상류 Samba 에서 이미 고쳐졌는지
+### 층 6 수정의 백포트 시점
 
-Samba master 의 `delete_all_streams()`(`source3/smbd/close.c`)는 `fsp_atname->base_name`
-과 호출자가 넘긴 `dirfsp` 를 함께 쓰는 **정상 형태**다. 반면 실측 대상인 4.23.6-Ubuntu 는
-basename 을 공유 루트 기준으로 해석했다.
+결함의 정체와 수정 커밋은 확정됐다(failure-model.md 층 6 '상류'). 남은 것은 **언제
+릴리스 브랜치에 들어오는가**이며, 그것은 우리 소관이 아니다.
 
-**4.23.6 의 소스를 직접 대조하지 않았으므로 "상류에서 고쳐졌다"고 단정할 수 없다.**
-결함이 어느 계층(`delete_all_streams` 자신인지, 스트림 VFS 모듈의 `unlinkat` 인지)에
-있는지도 라인 단위로는 특정하지 않았다.
-
-확인되면 두 가지가 따라온다 — 상류 보고(아직 하지 않았다)와, 업그레이드가 공유 루트
-상향보다 근본적인 해결인지의 판단. 재개 조건: Samba 를 올리게 될 때.
+지금 확인해야 할 때는 Samba 를 올릴 때다. 다음 두 가지가 함께 참이면 공유 루트 상향을
+되돌릴지 재검토할 수 있다 — 되돌릴 **의무**는 없다. 공유 루트를 워크스페이스 상위에 두는
+것은 이 결함이 없어도 그 자체로 방어적이다.
 
 ```bash
-# 대조 지점
-apt-get source samba && grep -n -A40 'delete_all_streams' source3/smbd/close.c
+# 설치된 버전에 수정이 들어왔는지 — dirfsp 를 쓰면 고쳐진 것
+grep -n -A12 'streams_xattr_unlinkat' source3/modules/vfs_streams_xattr.c | grep -n 'cwd_fsp\|dirfsp'
+# 실측 확인은 tools/probe-rename-collision.sh (공유 루트를 임시로 내려 보고 판정)
 ```
 
 ### 전체 디스크 접근 권한(FDA)의 도메인 간 상속
