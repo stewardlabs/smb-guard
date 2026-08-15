@@ -1,0 +1,105 @@
+#!/bin/bash
+# /usr/local/sbin/smbfix
+# 수동 SMB 복구 (대화형 터미널용).
+#
+# 자동 복구(웨이크 훅·마운트 이벤트 훅)가 끝내 실패했을 때 사람이 부르는 도구다.
+# 판정·교정 로직을 자체 보유하지 않고 smb-guard 에 위임한다 — 교정 주체는 하나여야 한다.
+#
+#   [1/3] 게스트 시계 점검·교정   [2/3] guard --remount   [3/3] 진단
+#
+# 터미널 출력에 더해 통합 로그에도 [smbfix] 태그로 기록한다. 수동 개입 시점이
+# guard·wakeup 이벤트와 같은 타임라인에 남아야 사후 추적이 성립한다.
+#
+# 자체 권한 승격: 로그 기록과 guard 호출이 root 를 요구하므로 시작 시 sudo 로 재실행한다.
+# ssh/mount_smbfs 는 소유자 자격으로 되돌려 실행한다 (~/.ssh/config, 로그인 키체인).
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# root가 아니면 스스로 승격한다. 대화형이므로 비밀번호 프롬프트가 정상 동작한다.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo /usr/local/sbin/smbfix "$@"
+fi
+
+SMBG_TAG="smbfix"
+. /usr/local/lib/smb-guard/common.sh
+
+GUEST_CLOCKFIX="/usr/local/sbin/clockfix"
+
+guest_ssh() {
+    smbg_as_owner ssh -o BatchMode=yes -o ConnectTimeout=3 "$SMBG_HOST" "$@"
+}
+
+say "=== smbfix 시작 (state=$(smbg_state)) ==="
+
+# ── [1/3] 게스트 시계 점검·교정 ─────────────────────────────────────────────
+say "[1/3] guest clock check & fix"
+remote="$(guest_ssh 'date +%s' 2>/dev/null)"
+
+if [[ "$remote" =~ ^[0-9]+$ ]]; then
+    off=$(( remote - $(date +%s) ))
+    say "  offset: ${off}s"
+    if [ "$off" -gt 2 ] || [ "$off" -lt -2 ]; then
+        # 초기 판에서는 안내만 했다. 그러다 대형 스큐 상황에서 안내가 건너뛰어진 채
+        # remount 로 진행된 실적이 있어 자동 교정으로 승격했다.
+        say "  → |off| > 2s — clockfix 실행"
+        # 소수점 epoch (perl 부재 시 정수 폴백 — 구 clockfix 와도 호환)
+        now="$(perl -MTime::HiRes=time -e 'printf "%.6f", time' 2>/dev/null || date +%s)"
+        guest_ssh "sudo -n $GUEST_CLOCKFIX $now"
+
+        remote="$(guest_ssh 'date +%s' 2>/dev/null)"
+        if [[ "$remote" =~ ^[0-9]+$ ]]; then
+            off2=$(( remote - $(date +%s) ))
+            say "  → 교정 후 offset: ${off2}s"
+            if [ "$off2" -gt 2 ] || [ "$off2" -lt -2 ]; then
+                say "  ⚠ 교정 실패 — 동기 계층 점검:"
+                say "     ssh $SMBG_HOST 'systemctl status chrony; chronyc tracking'"
+                say "     ssh $SMBG_HOST 'journalctl --since \"-1h\" | grep -i \"clock change\"'"
+                say "     하이퍼바이저의 게스트 시간 동기화가 켜져 있으면 게스트 NTP 와"
+                say "     배타적으로 동작할 수 있습니다 — docs/failure-model.md 층 1"
+            fi
+        fi
+
+        if [ "$off" -gt 300 ] || [ "$off" -lt -300 ]; then
+            # 대형 스큐 중 쓰인 파일은 미래 mtime 을 가질 수 있다.
+            # cargo 등 mtime 기반 fingerprint 를 쓰는 빌드 도구는 산출물이 미래면
+            # 소스 변경을 침묵 무시한다 — 가장 찾기 어려운 종류의 고장이다.
+            say "  ⚠ 대형 스큐(${off}s)를 교정했습니다. 게스트 파일시스템의 미래 타임스탬프 점검 권장:"
+            say "     ssh $SMBG_HOST 'find $SMBG_GUEST_ROOT -newermt now -printf \"%T+ %p\\n\" 2>/dev/null | head'"
+            say "     발견 시: 빌드 캐시 정리(cargo clean 등) 및 git log 커밋 시각 확인"
+        fi
+    fi
+else
+    say "  WARN: ssh unreachable — 게스트가 실행 중인지부터 확인"
+fi
+
+# ── [2/3] 재마운트 ──────────────────────────────────────────────────────────
+say "[2/3] remount (smb-guard --remount)"
+# 판정·교정 로직은 smb-guard 소관이다 (umount / automount -vc / 트리거 루프)
+if "$SMBG_GUARD" --remount; then
+    say "  remounted OK (mounted by $SMBG_OWNER)"
+    exit 0
+fi
+say "  guard 실패 (상세: $SMBG_LOG)"
+
+# ── [3/3] 진단 ──────────────────────────────────────────────────────────────
+say "[3/3] still dead — diagnosing"
+probe="/tmp/_smbprobe.$$"
+mkdir -p "$probe" && chown "$SMBG_OWNER" "$probe"
+
+# 프로브 마운트는 반드시 소유자의 세션 컨텍스트로 — 로그인 키체인의 SMB 자격증명이
+# root 컨텍스트에서는 조회되지 않아, 실제 원인과 무관한 인증 실패로 오진하게 된다.
+err="$(smbg_in_session /sbin/mount_smbfs "//$SMBG_SMB_USER@$SMBG_HOST/$SMBG_SHARE" "$probe" 2>&1)"
+mount | grep -q " on $probe " && umount "$probe" 2>/dev/null
+rmdir "$probe" 2>/dev/null
+
+say "  probe: ${err:-probe mount succeeded(!) — autofs 쪽 문제일 가능성}"
+
+if printf '%s' "$err" | grep -qi "too many users"; then
+    say "  → EUSERS 고착(맥 커널 smbfs 세션 잔재). 알려진 유일한 해법: 서버 재부팅"
+    say "    게스트를 재시작한 뒤 다시 smbfix 를 실행하세요"
+else
+    say "  → 로그 확인:"
+    say "    log show --last 5m --predicate 'process == \"automountd\" OR process == \"mount_smbfs\"' --info"
+    say "    log show --last 1h --predicate 'process == \"diskarbitrationd\" AND eventMessage CONTAINS \"$(basename "$SMBG_MP")\"' --info | grep -E 'created|removed'"
+fi
+exit 1

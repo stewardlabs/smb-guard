@@ -1,0 +1,24 @@
+#!/bin/sh
+# /usr/local/sbin/clockfix
+# usage: clockfix <epoch_seconds[.frac]>   (root로만 실행됨 — sudoers NOPASSWD 대상)
+#
+# 하이퍼바이저 게스트의 resume 직후 시계를 호스트 권위로 즉시 맞춘다.
+# 각성 중 상시 보정은 NTP 데몬(chrony)의 몫이고, 이 도구는 거친 step 만 담당한다.
+#
+#   · 소수점 epoch 수용 — 호스트 훅이 perl로 μs 정밀도 값을 보낸다.
+#     정수도 그대로 수용한다(폴백 호환). GNU date는 "@sec.frac" 를 지원한다.
+#   · step 후 chronyc online — 수면 중 dispatcher가 offline 처리한 NTP 소스를
+#     즉시 복귀시킨다 (1h11m offline 방치 실측). chronyd는 step을 자체
+#     감지해 이력을 리셋하므로 burst/makestep 은 불필요하다. chrony 부재/정지
+#     시에도 clockfix 본연의 동작은 성립해야 하므로 실패는 무시한다.
+#
+# 출력 형식 "clockfix: ..." 은 로그 규약이다 — 훅이 접두사를 덧붙이지 않고 원문
+# 그대로 기록한다 (설계 원칙 14: 계층 접두사는 한 곳에서만 붙인다).
+case "$1" in
+    ''|.|*[!0-9.]*|.*|*.|*.*.*) echo "usage: clockfix <epoch_seconds[.frac]>" >&2; exit 1 ;;
+esac
+before=$(date +%s.%N)
+date -s "@$1" >/dev/null
+echo "clockfix: ${before} -> $(date +%s.%N) ($(date '+%F %T %Z'))"
+command -v chronyc >/dev/null 2>&1 && chronyc online >/dev/null 2>&1 || true
+exit 0

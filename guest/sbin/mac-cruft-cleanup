@@ -1,0 +1,127 @@
+#!/bin/bash
+# /usr/local/sbin/mac-cruft-cleanup
+#
+# macOS Finder 가 SMB 공유에 남기는 잔재를 주기적으로 회수한다.
+# smb.conf 의 `veto files` 를 대체한다 — docs/decisions.md 의 '차단 폐지' 결정.
+#
+# v1.2: 순회 제외 목록을 PRUNE_NAMES 로 분리하고 빌드 산출물을 기본 포함.
+#       워크스페이스 루트가 단일 레포가 아니라 **여러 레포가 다양한 깊이에
+#       존재하는 트리**인 경우가 흔하다. 레포마다 target/ 이
+#       있으므로 순회 비용의 대부분이 빌드 산출물이었다 — 실측 표본에서
+#       733 항목 중 714가 target/·node_modules/ 였다(97%).
+#       그 안의 .DS_Store 를 남겨두는 대가는 사실상 없다: 빌드 산출물은 이미
+#       전역 git ignore 대상이라 이력을 오염시키지 않고, cargo clean 으로 함께
+#       사라진다. 비용만 있고 이득이 없는 순회였다.
+#       주의: 소스 트리에 우연히 'target' 이라는 이름의 디렉터리가 있으면 그
+#       안의 잔재도 남는다. 무해하지만(전역 ignore 대상), 신경 쓰이면
+#       PRUNE_NAMES 에서 target 을 빼면 된다.
+# v1.1: 디렉터리 회수 목록에 .DocumentRevisions-V100 추가 — 전역 git ignore
+#       정본과 대상 집합을 일치시킨다. 로직 변경 없음.
+#
+# 왜 차단이 아니라 정리인가:
+#   Finder CopyEngine 은 .DS_Store 쓰기 실패를 복사 작업 전체의 치명적 오류로
+#   취급한다(-8062). 서버에서 막으면 Finder 의 주 기능이 죽는다. 원하는 것은
+#   "결과 상태의 청결"이고, 그 처방은 사후 정리다 (§9 원칙 26).
+#   정리는 실패해도 아무것도 깨뜨리지 않는다 — 그것이 차단과의 결정적 차이다.
+#
+# 출력 규약:
+#   제거가 0건이면 아무것도 출력하지 않는다(로그가 조용하다).
+#   1건 이상이면 요약 한 줄을 stdout 으로 낸다 → systemd 가 journald 로 수집한다.
+#   이 한 줄이 §6 의 관찰 채널이다: .DS_Store 가 매번 다량이면 맥의
+#   DSDontWriteNetworkStores 억제가 실효 중이지 않다는 신호다(기능 고장은 아니다).
+#   **주의(원칙 25)**: 회수 대상이 없어서 조용한 것과 고장으로 조용한 것은
+#   출력으로 구분되지 않는다. 실증할 때는 대상을 남겨 둔 채 실행할 것.
+#
+# usage: mac-cruft-cleanup [워크스페이스_경로]
+#   경로는 인자 > /etc/smb-guard.conf 의 SMBG_GUEST_ROOT 순으로 결정한다.
+#   **기본 경로를 코드에 박지 않는다** — 엉뚱한 트리를 훑고 지우는 것보다 실패가 낫다.
+#
+#   환경변수(설정 파일보다 우선한다 — 일회성 오버라이드용):
+#     TRASH_AGE_DAYS=7                    .Trashes 유예 기간
+#     PRUNE_NAMES=".git .Trashes target node_modules"
+#                                         순회에서 통째로 건너뛸 디렉터리 이름.
+#                                         경로가 아니라 **이름** 기준이므로 깊이와
+#                                         무관하게 적용된다 — 다중 레포 구조에서
+#                                         모든 .git / target 이 자동으로 제외된다.
+#                                         .Trashes 는 아래 3)에서 별도 정책으로
+#                                         다루므로 목록에서 빼지 말 것.
+#
+# 멱등하다. 수동 실행 가능. root 로 실행한다.
+
+set -uo pipefail
+
+# 환경변수 오버라이드가 설정 파일보다 우선하도록 먼저 보존한다.
+# (설정 파일은 source 되므로 그대로 두면 환경변수를 덮어쓴다)
+_env_trash="${TRASH_AGE_DAYS:-}"
+_env_prune="${PRUNE_NAMES:-}"
+
+SMBG_CONF="${SMBG_CONF:-/etc/smb-guard.conf}"
+[ -r "$SMBG_CONF" ] && . "$SMBG_CONF"
+
+ROOT="${1:-${SMBG_GUEST_ROOT:-}}"
+if [ -z "$ROOT" ]; then
+    echo "usage: mac-cruft-cleanup <워크스페이스_경로>" >&2
+    echo "       (또는 $SMBG_CONF 에 SMBG_GUEST_ROOT 를 설정)" >&2
+    exit 2
+fi
+
+TRASH_AGE_DAYS="${_env_trash:-${TRASH_AGE_DAYS:-7}}"
+PRUNE_NAMES="${_env_prune:-${PRUNE_NAMES:-.git .Trashes target node_modules}}"
+
+if [ ! -d "$ROOT" ]; then
+    echo "mac-cruft-cleanup: '$ROOT' 가 없다 — 중단" >&2
+    exit 1
+fi
+
+# PRUNE_NAMES 를 find 표현식으로 조립한다:
+#   ( -type d ( -name A -o -name B ... ) ) -prune -o
+PRUNE=( '(' -type d '(' )
+_first=1
+for _n in $PRUNE_NAMES; do
+    if [ "$_first" -eq 1 ]; then _first=0; else PRUNE+=( -o ); fi
+    PRUNE+=( -name "$_n" )
+done
+PRUNE+=( ')' ')' -prune -o )
+
+# 1) 파일류 — 즉시 회수
+#    ._*   : AppleDouble (fruit:resource = file 의 산물). 리소스 포크가 실제로
+#            있는 파일은 이 워크스페이스(Rust/git)에 사실상 존재하지 않는다.
+#
+#    -delete 를 쓰지 않는 이유: GNU find 의 -delete 는 -depth 를 자동으로 켜고,
+#    -depth 가 켜지면 -prune 이 무력화된다(find 가 아예 거부한다). 순회 제외를
+#    포기할 수 없으므로 삭제는 -exec rm 으로 한다. 08-14 실측으로 확인.
+n_file=$(find "$ROOT" -xdev "${PRUNE[@]}" \
+    -type f '(' -name '.DS_Store' -o -name '._*' -o -name '.apdisk' ')' \
+    -print -exec rm -f -- '{}' + 2>/dev/null | wc -l)
+
+# 2) 디렉터리류 — 통째로 회수
+#    매칭된 디렉터리에 -prune 을 먼저 걸어, 삭제한 디렉터리로 find 가 하강해
+#    오류를 뱉는 것을 막는다.
+n_dir=$(find "$ROOT" -xdev "${PRUNE[@]}" \
+    -type d '(' -name '.TemporaryItems' -o -name '.fseventsd' \
+              -o -name '.Spotlight-V100' -o -name '.DocumentRevisions-V100' \
+              -o -name '.AppleDouble'    -o -name '.AppleDB' \
+              -o -name '.AppleDesktop' ')' \
+    -prune -print -exec rm -rf -- '{}' + 2>/dev/null | wc -l)
+
+# 3) .Trashes — 즉시 삭제하지 않는다.
+#    되돌릴 수 없는 휴지통은 휴지통이 아니다. Finder 의 "휴지통으로 이동"이
+#    사실상의 즉시 삭제가 되면 사용자가 그것을 신뢰할 수 없다 (§8 v17).
+#    mindepth/maxdepth 2 = .Trashes/<uid>/<항목>. uid 디렉터리 자체는 보존한다.
+#    공유 루트가 곧 $ROOT 이므로 Finder 는 여기에만 .Trashes 를 만든다.
+n_trash=0
+if [ -d "$ROOT/.Trashes" ]; then
+    n_trash=$(find "$ROOT/.Trashes" -xdev -mindepth 2 -maxdepth 2 \
+        -mtime "+${TRASH_AGE_DAYS}" \
+        -print -exec rm -rf -- '{}' + 2>/dev/null | wc -l)
+fi
+
+total=$(( n_file + n_dir + n_trash ))
+
+if [ "$total" -gt 0 ]; then
+    echo "mac-cruft-cleanup: 제거 ${total}건" \
+         "(파일 ${n_file} / 디렉터리 ${n_dir} / 휴지통 ${n_trash}, 유예 ${TRASH_AGE_DAYS}일)" \
+         "@ ${ROOT}"
+fi
+
+exit 0

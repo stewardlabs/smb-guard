@@ -1,0 +1,27 @@
+# /etc/systemd/system/mac-cruft-cleanup.service
+#
+# smb.conf 의 `veto files` 를 대체하는 사후 정리 (docs/decisions.md).
+# 차단이 아니라 정리이므로, 이 유닛이 실패해도 클라이언트는 정상 동작한다.
+#
+# 이 파일은 템플릿이다. install.sh 가 워크스페이스 경로로 치환해 배치한다 —
+# systemd 는 ConditionPathIsDirectory=/ReadWritePaths= 에서 환경변수를 확장하지
+# 않으므로, 이 경로들은 배치 시점에 박혀 있어야 한다.
+
+[Unit]
+Description=Purge macOS Finder cruft from the SMB workspace
+ConditionPathIsDirectory=@GUEST_ROOT@
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mac-cruft-cleanup @GUEST_ROOT@
+
+# 15분 주기 find 가 빌드를 방해하지 않게 한다. 이 작업은 언제 끝나도 무방하다.
+Nice=10
+IOSchedulingClass=idle
+
+# 워크스페이스 외에는 손대지 않는다.
+ProtectSystem=strict
+ReadWritePaths=@GUEST_ROOT@
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

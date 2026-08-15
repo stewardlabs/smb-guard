@@ -1,0 +1,7 @@
+# 실운영 설정값 — 환경 고유값이므로 커밋하지 않는다.
+# 예시는 smb-guard.conf.example 이고, 이 파일은 그것을 복사해 채운 것이다.
+smb-guard.conf
+
+# macOS
+.DS_Store
+._*

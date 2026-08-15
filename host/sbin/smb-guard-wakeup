@@ -1,0 +1,182 @@
+#!/bin/bash
+# /usr/local/sbin/smb-guard-wakeup
+# sleepwatcher -w 훅. 웨이크 직후 게스트와 SMB 마운트를 사용 가능 상태로 되돌린다.
+#
+# 시계 역할 분리: 각성 중 상시 보정은 게스트의 NTP 데몬(chrony)이 담당하고, resume 직후의
+# 즉시 step 은 이 훅이 clockfix 로 담당한다. 하이퍼바이저 시간 동기화는 게스트 NTP 와
+# 배타적일 수 있으므로(Parallels 의 prltimesync 는 기동 시 `timedatectl set-ntp 0` 을
+# 실행한다) 끄는 것을 전제로 한다 — docs/failure-model.md 층 1.
+#
+# clockfix 인자는 소수점 epoch(μs) 다. macOS date 는 %N 을 지원하지 않아 perl -MTime::HiRes
+# 로 얻는다. 정수 절삭(최대 1s)이 오차의 지배 항이었으므로 이 한 가지로 정밀도가
+# ±1s → ssh 편도 지연(수십 ms) 수준으로 올라간다. perl 부재 시 정수로 폴백한다.
+#
+# root(system 도메인) 실행 전제. 사용자 자격이 필요한 호출은 명시적으로 전환한다:
+#     ssh          → smbg_as_owner   (~/.ssh/config 의 게스트 별칭·키가 소유자 것이어야 함)
+#     open(1)      → smbg_in_session (GUI 세션 필요)
+#     생존성 ls    → smbg_in_session (소유자 관점의 접근성이 측정 대상이므로)
+#   user 도메인(LaunchAgent)으로 되돌리더라도 래퍼가 무동작으로 성립하므로 그대로 동작한다.
+#
+# 마운트에 대한 판정·교정은 전부 smb-guard 에 위임한다. 이 스크립트는
+# "언제 guard 를 부를지"와 "웨이크 고유의 관측"만 담당한다.
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+T0=$(date +%s)
+SMBG_TAG="wakeup"
+. /usr/local/lib/smb-guard/common.sh
+exec >>"$SMBG_LOG" 2>&1    # 새어나온 stdout/stderr도 같은 로그로 모은다.
+                           # 태그 없는 줄이 보이면 그 자체가 "누출 발생" 신호다.
+
+# 게스트측 clockfix 배치 경로 (guest/install.sh 가 여기에 설치한다)
+GUEST_CLOCKFIX="/usr/local/sbin/clockfix"
+
+# 태그에 경과시간을 덧붙인다 → "[wakeup +12s]".
+smbg_tag() { printf 'wakeup +%ss' $(( $(date +%s) - T0 )); }
+
+log "=== wakeup 시작 ==="
+
+# ── 0) 스퓨리어스 웨이크 게이트 ─────────────────────────────────────────────
+if [ -r "$SMBG_LAST_SLEEP" ]; then
+    slept=$(( T0 - $(cat "$SMBG_LAST_SLEEP") ))
+    log "slept for ${slept}s"
+    if [ "$slept" -lt "$SMBG_SLEEP_GATE" ]; then
+        log "immediate wake (<${SMBG_SLEEP_GATE}s) — sleep-transition darkwake로 판단, 전체 스킵"
+        exit 0
+    fi
+else
+    log "no last_sleep record — proceeding"
+fi
+
+# 주의: 직전 웨이크 유형 관찰(pmset -g log)은 이 위치에 두지 않는다.
+#   pmset -g log 는 전원 로그 전체를 파싱하며 **실측 11초**가 걸린다.
+#   이 호출이 게이트 직후에 있던 시절, 순수 관찰용 코드가 네트워크 대기·clockfix·
+#   마운트 보장 전부를 11초 뒤로 밀었다 — 성능 목표를 못 지킨 유일한 원인이었다.
+#   관찰 데이터는 스크립트 끝에서 수집해도 동일하게 유효하므로 끝으로 이관했다.
+
+# ── 1) 사용자 훅 (선택) ─────────────────────────────────────────────────────
+# 이 체계와 무관하지만 웨이크 시점에 함께 처리하고 싶은 것(로컬 볼륨 마운트 앱 등).
+# 설정이 비어 있으면 무동작이다.
+if [ -n "$SMBG_WAKE_USER_HOOK" ] && [ -e "$SMBG_WAKE_USER_HOOK" ]; then
+    if smbg_session_active; then
+        if [ -d "$SMBG_WAKE_USER_HOOK" ]; then     # .app 번들
+            smbg_in_session /usr/bin/open "$SMBG_WAKE_USER_HOOK" \
+                || log "사용자 훅 open 실패: $SMBG_WAKE_USER_HOOK"
+        elif [ -x "$SMBG_WAKE_USER_HOOK" ]; then
+            smbg_in_session "$SMBG_WAKE_USER_HOOK" \
+                || log "사용자 훅 실행 실패: $SMBG_WAKE_USER_HOOK"
+        else
+            log "사용자 훅이 실행 가능하지 않음: $SMBG_WAKE_USER_HOOK"
+        fi
+    else
+        log "GUI 세션 없음 — 사용자 훅 스킵"
+    fi
+fi
+
+# ── 2) 게스트 주소 확정 ─────────────────────────────────────────────────────
+# /etc/hosts 에 등록되어 있으면 그 IP 를 쓰고, 없으면 호스트명을 그대로 넘긴다.
+# nc 는 호스트명도 받으므로 폴백이 성립한다. mDNS 는 웨이크 직후 해석 지연이 있어
+# 1차 수단으로 쓰지 않는다.
+#
+# 두 번째 필드만 보면 안 된다 — hosts 의 정식 이름 뒤에 별칭이 오는 형식
+# (`10.0.0.4  host.domain  host`)에서는 별칭이 3번째 이후 필드에 있어 매칭에 실패한다.
+# 하이퍼바이저가 자동 등록하는 항목이 정확히 이 형식이다. 전 필드를 훑는다.
+addr="$(awk -v h="$SMBG_HOST" '{for(i=2;i<=NF;i++) if($i==h){print $1; exit}}' /etc/hosts)"
+: "${addr:=$SMBG_HOST}"
+log "$SMBG_HOST -> $addr"
+
+# ── 3) 네트워크 대기 (sshd) ─────────────────────────────────────────────────
+i=0
+while ! nc -z -G 1 "$addr" 22 >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ "$i" -ge 30 ]; then
+        log "network to $addr:22 not up after ~60s — giving up"
+        exit 0
+    fi
+    sleep 2
+done
+log "network up"
+
+# ── 4) 시계 확인 → 어긋나 있으면 즉시 clockfix ──────────────────────────────
+guest_ssh() {
+    smbg_as_owner ssh -o BatchMode=yes -o ConnectTimeout=3 "$SMBG_HOST" "$@"
+}
+
+off=""
+for i in 1 2 3; do
+    remote="$(guest_ssh 'date +%s' 2>/dev/null)"
+    if [[ "$remote" =~ ^[0-9]+$ ]]; then
+        off=$(( remote - $(date +%s) ))
+        break
+    fi
+    sleep 1
+done
+
+if [ -z "$off" ]; then
+    log "WARN: could not read guest clock — proceeding anyway"
+elif [ "$off" -ge -2 ] && [ "$off" -le 2 ]; then
+    log "clock ok (offset ${off}s)"
+else
+    log "initial offset: ${off}s — forcing clockfix"
+    # 소수점 epoch 전송. perl 부재/실패 시 정수 폴백(구 clockfix 와도 호환).
+    now="$(perl -MTime::HiRes=time -e 'printf "%.6f", time' 2>/dev/null || date +%s)"
+    # clockfix 의 출력은 이미 "clockfix: ..." 로 자기를 식별한다. 접두사를 덧붙이면
+    # "clockfix: clockfix: ..." 가 된다. 원문 그대로 기록한다 (설계 원칙 14).
+    guest_ssh "sudo -n $GUEST_CLOCKFIX $now" 2>&1 | while IFS= read -r l; do
+        [ -n "$l" ] && log "$l"
+    done
+    remote="$(guest_ssh 'date +%s' 2>/dev/null)"
+    [[ "$remote" =~ ^[0-9]+$ ]] && log "offset after clockfix: $(( remote - $(date +%s) ))s"
+fi
+
+# ── 5) smbd 포트 확인 ───────────────────────────────────────────────────────
+i=0
+while ! nc -z -G 1 "$addr" 445 >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ "$i" -ge 10 ]; then
+        log "smbd port not responding — giving up"
+        exit 0
+    fi
+    sleep 2
+done
+
+# ── 6) 마운트 보장 — 소유권 판정·FOREIGN 교정·부재 시 생성·플러시 재시도는
+#       전부 smb-guard로 단일화. guard는 mount 테이블로만 판정하므로
+#       TCC EPERM 오판이 구조적으로 없다.
+if ! smbg_guard --ensure; then
+    log "STILL DEAD — guard --ensure 실패 (smbfix 필요)"
+    exit 0
+fi
+
+# ── 7) 생존성 프로브 — 웨이크 고유 역할 ─────────────────────────────────────
+#    소유권은 guard가 보장했다. 여기서는 freeze 직후 SMB 세션 재수립을
+#    강제·검증하고 재접속 지연을 측정한다.
+t_ls=$(date +%s)
+if err="$(smbg_in_session /bin/ls "$SMBG_MP" 2>&1 >/dev/null)"; then
+    log "mount HEALTHY (ls ok, $(( $(date +%s) - t_ls ))s)"
+elif [ "${err#*Operation not permitted}" != "$err" ]; then
+    log "mount HEALTHY (ls TCC-denied — probe-context 한계)"
+else
+    log "mount UNHEALTHY (ls: [$err], $(( $(date +%s) - t_ls ))s) — guard --remount로 재수립"
+    if smbg_guard --remount; then
+        log "remounted OK"
+    else
+        log "STILL DEAD after remount (smbfix 필요)"
+    fi
+fi
+
+# ── 8) 관찰: 직전 웨이크 유형 ───────────────────────────────────────────────
+#    임계 경로에서 제외했다(위 주석 참조). 마운트가 이미 사용 가능해진 뒤이므로
+#    여기서 11초를 쓰더라도 체감 지연이 없다.
+#    pmset 로그는 탭 구분 컬럼 구조다:  "시각 도메인(Wake/DarkWake)<탭>상세..."
+#    탭을 공백으로 압축만 하면 도메인과 상세의 첫 단어가 붙어 "Wake Wake from ..." 으로
+#    보인다. 탭(컬럼 경계)을 ' — ' 로 치환해 경계를 보존한다.
+#    도메인 값 자체는 제거하지 않는다 — DarkWake 여부가 층 2 판정의 1차 증거다.
+#    pmset 자체 타임스탬프도 남긴다 — 이 시점의 log() 시각과 멀어졌기 때문에
+#    "실제 웨이크 시각 vs 훅 발화 시각" 대조에 필요하다.
+wt="$(pmset -g log 2>/dev/null | grep -E "DarkWake|Wake from" | tail -1 \
+      | sed 's/[[:space:]]*\t[[:space:]]*/ — /g' | tr -s ' ' ' ')"
+[ -n "$wt" ] && log "last wake event: $wt"
+
+log "=== wakeup 종료 ==="
+exit 0

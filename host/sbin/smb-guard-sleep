@@ -1,0 +1,24 @@
+#!/bin/bash
+# /usr/local/sbin/smb-guard-sleep
+# sleepwatcher -s 훅. 슬립 직전에 발화한다.
+#
+# 의도적으로 "기록만" 한다:
+#   1) macOS가 -s 훅에 주는 시간은 짧고 보장되지 않는다. 여기서 네트워크 I/O나
+#      umount를 시도하면 완료 전에 슬립이 진행될 수 있고, 중단된 umount는
+#      오히려 더 나쁜 중간 상태를 남긴다.
+#   2) 이 체계의 복구 전략은 "웨이크 측 수선"이다. 슬립 측은 웨이크 측이
+#      판단에 쓸 사실(직전 슬립 시각, 그때의 상태)만 남긴다.
+#
+# 슬립 전 언마운트를 도입하고 싶다면 여기가 아니라 별도 검토가 필요하다
+# (freeze된 SMB 세션의 umount -f 는 그 자체로 수 초간 블록될 수 있다).
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+SMBG_TAG="sleep"
+. /usr/local/lib/smb-guard/common.sh
+exec >>"$SMBG_LOG" 2>&1    # 새어나온 stdout/stderr도 같은 로그로 모은다.
+                           # 태그 없는 줄이 보이면 그 자체가 "누출 발생" 신호다.
+
+date +%s > "$SMBG_LAST_SLEEP" 2>/dev/null   # 웨이크 측 스퓨리어스 게이트용
+log "sleep — state=$(smbg_state)"
+exit 0

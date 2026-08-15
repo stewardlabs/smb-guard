@@ -1,0 +1,8 @@
+# /etc/chrony/conf.d/local-pool.conf   (예시 — 자신의 지역으로 바꿀 것)
+#
+# 근거리 소스. 배포판 기본 pool 이 지리적으로 멀면 RTT 와 도달성이 나빠진다.
+#
+# maxpoll 6 (64초) 은 clockfix 가 실패했을 때 폴백의 최악 복구 시간 상한이다.
+# 기본값 1024초로는 웨이크 후 17분간 시계가 틀린 채로 남을 수 있다.
+# 배포판 기본 pool 줄에도 같은 이유로 maxpoll 6 을 붙이는 것을 권한다.
+pool kr.pool.ntp.org iburst maxsources 3 maxpoll 6

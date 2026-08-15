@@ -1,0 +1,15 @@
+# /etc/newsyslog.d/@LABEL_PREFIX@.smb.conf   (root:wheel 644 — 그렇지 않으면 무시된다)
+#
+# 이 파일은 템플릿이다. install.sh 가 설정값으로 치환해 배치한다.
+#
+# size 는 KB 단위. when 의 '*' 는 "시각 조건 없음 = 크기 조건만" 을 뜻한다.
+# flags: J = bzip2 압축, G = 파일명 글로브 허용
+#
+# 회전은 truncate 가 아니라 세대 이동이다:
+#   smb-guard.log → smb-guard.log.0.bz2 → .1.bz2 → ... → count 초과분 삭제
+# 즉 오래된 것부터 밀려나며, 최근 내용은 보존된다.
+#
+# logfilename                            [owner:group]  mode  count  size  when  flags
+@LOGDIR@/smb-guard.log               root:wheel     644   7      1024  *     GJ
+@LOGDIR@/smb-guard.launchd.log       root:wheel     644   4      512   *     GJ
+@LOGDIR@/sleepwatcher.launchd.log    root:wheel     644   4      512   *     GJ

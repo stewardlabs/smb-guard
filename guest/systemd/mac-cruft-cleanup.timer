@@ -1,0 +1,16 @@
+# /etc/systemd/system/mac-cruft-cleanup.timer
+
+[Unit]
+Description=Run macOS cruft cleanup every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+# 주의: Persistent= 는 OnCalendar 전용이다. 모노토닉 타이머에 적으면 조용히
+# 무시되어 "놓친 실행을 따라잡는다"는 오해만 남는다 — 그래서 두지 않는다.
+# 부팅 5분 뒤 1회 실행되므로 다운타임 보정은 이미 성립한다.
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,125 @@
+#===============================================================================
+# /etc/samba/smb.conf — 워크스페이스 공유 (템플릿)
+#
+# install.sh 가 설정값으로 치환한다. **기본적으로 자동 배치하지 않는다** —
+# 기존 smb.conf 를 통째로 덮으면 이 공유와 무관한 설정이 사라지기 때문이다.
+# `guest/install.sh --samba` 를 명시해야 배치되며 그때도 기존 파일을 백업한다.
+# 그 외에는 치환 결과를 출력하므로 필요한 부분만 병합하면 된다.
+#
+# 핸드오프 v17 §8 결정에 따른 개정. v16 대비 변경 3건:
+#
+#   1) veto files / delete veto files  ......  폐지
+#      macOS Finder 의 CopyEngine 은 .DS_Store 쓰기 실패를 "복사 작업 전체의
+#      치명적 오류"로 취급한다 → Finder 오류 코드 -8062 로 복사 전량 실패.
+#      .Trashes 차단도 "휴지통으로 이동"을 깨뜨리는 잠복 버그였다.
+#      차단(deny)은 이 계층의 처방이 아니다 — 원하는 것은 "결과 상태의 청결"이고,
+#      그것의 처방은 사후 정리다 (§9 원칙 26).
+#      → mac-cruft-cleanup.timer(사후 정리) + git ignore(이력 오염 차단) 가
+#        같은 요구를 Finder 를 깨뜨리지 않고 만족시킨다.
+#
+#   2) fruit:resource = file  ..............  명시
+#      기본값이지만 의도를 파일에 남긴다. streams_xattr 로 보내면(=stream)
+#      ext4 의 xattr 크기 한계(inode 여유 + 1블록, 통상 4KB)를 그대로 물려받아
+#      큰 리소스 포크에서 쓰기가 실패한다 — 지금 고치는 -8062 와 같은 형태다.
+#
+#   3) 근거 주석  ..........................  추가
+#      근거가 소멸하면 정책도 재검토 대상이다 (§9 원칙 5).
+#
+# 운영 계약: 잔재가 다시 문제가 되면 **정리 쪽을 손본다.** veto 복원은 -8062 의
+#            재도입이다.
+#
+# 적용:  testparm -s            (구문 검사, 오류 0건)
+#        systemctl restart smbd
+#        testparm -s 2>/dev/null | grep -E '^\s*veto files'   → 0줄이어야 한다
+#
+#        주의: grep -i veto 로 검사하지 말 것. fruit:veto_appledouble = no 가
+#        이름 때문에 잡히는데, 그 줄은 차단이 아니라 차단 해제이며 반드시
+#        남아 있어야 한다 (아래 주석 참조).
+#===============================================================================
+
+[global]
+#--- 프로토콜 · macOS 상호운용 --------------------------------------------------
+   server min protocol = SMB3
+   ea support = yes
+   spotlight = no
+
+#--- 프린터 비활성 (공유 대상 아님) ----------------------------------------------
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+
+#--- 서버 정체성 ---------------------------------------------------------------
+   workgroup = WORKGROUP
+   disable netbios = yes
+   server string = %h server (Samba, Ubuntu)
+   server role = standalone server
+
+#--- 로깅 ----------------------------------------------------------------------
+   log file = /var/log/samba/log.%m
+   max log size = 1000
+   logging = file
+   panic action = /usr/share/samba/panic-action %d
+
+#--- 인증 ----------------------------------------------------------------------
+   obey pam restrictions = yes
+   unix password sync = yes
+   passwd program = /usr/bin/passwd %u
+   passwd chat = *Enter\snew\s*\spassword:* %n\n *Retype\snew\s*\spassword:* %n\n *password\supdated\ssuccessfully* .
+   pam password change = yes
+
+   map to guest = bad user
+   usershare allow guests = yes
+
+
+[@SHARE@]
+   path = @GUEST_ROOT@
+   valid users = @SMB_USER@
+   read only = no
+   browseable = yes
+
+#--- 대소문자 -------------------------------------------------------------------
+# git 이 대소문자를 구분하므로 서버도 구분한다.
+# 맥 클라이언트에서의 실효성은 아직 미검증 (핸드오프 §11).
+   case sensitive = yes
+   preserve case = yes
+   short preserve case = yes
+
+#--- 권한 -----------------------------------------------------------------------
+   create mask = 0644
+   directory mask = 0755
+
+# no 면 DOS 속성이 실행 비트로 매핑되어 오염된다.
+   store dos attributes = yes
+
+#--- macOS 확장 (vfs_fruit) ------------------------------------------------------
+   vfs objects = catia fruit streams_xattr
+   fruit:model = MacSamba
+   fruit:posix_rename = yes
+   fruit:wipe_intentionally_left_blank_rfork = yes
+   fruit:delete_empty_adfiles = yes
+
+# FinderInfo · DOS 속성 → xattr (._* 파일 대신).
+# 수십 바이트라 ext4 xattr 한계와 무관하다.
+# git 은 xattr 을 추적하지 않으므로 여기 쌓이는 것은 이력을 오염시키지 않는다.
+   fruit:metadata = stream
+
+# 리소스 포크는 xattr 로 보내지 않는다 (v17 판단 — 위 헤더 2번 항목).
+# 기본값과 같지만 의도를 명시한다.
+   fruit:resource = file
+
+# ._* 를 veto 하지 않는다. 이름에 "veto"가 들어 있으나 veto files 계열이 아니며,
+# no = 차단 해제다. 기본값 yes 는 fruit 이 만든 ._* 에 클라이언트가 접근하지
+# 못하게 하는데, vfs_fruit(8) 매뉴얼이 그 부작용으로 "맥 클라이언트에서 Mac ZIP
+# 아카이브 풀기 실패"를 든다 — .DS_Store -8062 와 같은 고장 구조다.
+# 이 옵션은 fruit:resource = file 일 때만 적용되므로(매뉴얼), 위에서 file 을
+# 명시한 v17 부터 실효를 갖는다. yes 로 되돌리지 말 것.
+   fruit:veto_appledouble = no
+
+# Finder 의 chown/chmod 시도로 인한 오작동 방지
+   fruit:nfs_aces = no
+
+#--- veto 없음 (v17) -------------------------------------------------------------
+# 여기에 veto files 를 두지 않는다. 두면 Finder 복사가 -8062 로 전량 실패한다.
+# macOS 잔재(.DS_Store, ._*, .TemporaryItems, .Trashes ...)의 회수는
+#   /usr/local/sbin/mac-cruft-cleanup  +  mac-cruft-cleanup.timer
+# 가 담당한다. 이력 오염은 git 의 ignore 계층이 막는다.

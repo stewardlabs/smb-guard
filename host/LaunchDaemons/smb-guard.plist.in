@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- /Library/LaunchDaemons/@LABEL_PREFIX@.smb-guard.plist (root:wheel 644)
+
+	     이 파일은 템플릿이다. install.sh 가 설정값으로 치환해 배치한다 —
+	     플레이스홀더가 남아 있는 파일을 직접 복사하지 말 것.
+
+	     시스템의 모든 파일시스템 마운트 이벤트에 발화한다.
+	     smb-guard(watch 모드)는 첫 판정에서 대상 마운트 외에는 즉시 종료하므로
+	     USB 등 무관한 마운트의 비용은 mount 테이블 1회 조회뿐이다.
+
+	     핵심 커버리지: backupd 등 root 프로세스가 root 소유 smbfs 마운트를 만드는
+	     바로 그 순간이 마운트 이벤트이므로, 하이재킹 발생 즉시 발화하여 교정한다.
+
+	     RunAtLoad: 데몬 적재 시점(부팅 포함)에 1회 실행하여, 데몬이 없던 사이에
+	     생긴 FOREIGN을 청소한다. watch 모드이므로 마운트를 새로 만들지는 않는다.
+
+	     감시 대상은 특정 마운트가 아니라 **모든 마운트 이벤트**다. 대상 판정은
+	     스크립트가 mount 테이블로 하므로 여기에 경로를 박지 않는다. -->
+	<key>Label</key>
+	<string>@LABEL_PREFIX@.smb-guard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/smb-guard</string>
+	</array>
+	<key>StartOnMount</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<!-- 교정 과정(umount→트리거)이 이벤트를 연쇄시킬 수 있으므로 재실행 간격을 둔다.
+	     스크립트 내부의 mkdir 잠금과 이중 방어. -->
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<!-- stdout/stderr를 같은 파일로 모은다. 일부 도구는 에러를 stdout으로 내보내며,
+	     StandardOutPath가 없으면 그 증거가 /dev/null로 사라진다(원칙 3: 판정은 1차 증거로).
+	     스크립트가 exec 리다이렉션에 도달하기 전의 실패(shebang 오류 등)도 여기 남는다. -->
+	<key>StandardOutPath</key>
+	<string>@LOGDIR@/smb-guard.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGDIR@/smb-guard.launchd.log</string>
+</dict>
+</plist>
