@@ -111,10 +111,20 @@ if [ "$DO_GUEST" -eq 1 ]; then
     STAGE="/tmp/smb-guard-install.$$"
     echo "-- transfer: $STAGE"
     ssh "$SMBG_HOST" "mkdir -p '$STAGE'"
-    # Send without macOS extended attributes (provenance/quarantine). Including
-    # them makes GNU tar emit a warning per entry, burying the real errors.
+    # Send without macOS extended attributes (provenance/quarantine) or BSD file
+    # flags. Either one makes the guest's GNU tar emit a warning per entry, burying
+    # the real errors.
+    #
+    # **--no-xattrs alone is not enough.** File flags come from chflags, not from
+    # extended attributes, so they survive it and still produce one
+    # "Ignoring unknown extended header keyword 'SCHILY.fflags'" per entry — which
+    # is exactly what this pair of options exists to prevent.
     # COPYFILE_DISABLE stops ._* files from being bundled along.
-    COPYFILE_DISABLE=1 tar --no-xattrs -C "$ROOT" -cf - guest \
+    #
+    # Both options are bsdtar (libarchive); GNU tar has neither. That is fine here
+    # because this side always runs on the macOS host, but it is the thing to fix
+    # first if this orchestrator is ever ported to a Linux host.
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-fflags -C "$ROOT" -cf - guest \
         | ssh "$SMBG_HOST" "tar -C '$STAGE' -xf -"
     # shellcheck disable=SC2002
     cat "$CONF" | ssh "$SMBG_HOST" "cat > '$STAGE/smb-guard.conf'"
