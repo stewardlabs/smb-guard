@@ -4,21 +4,23 @@
 <dict>
 	<!-- /Library/LaunchDaemons/@LABEL_PREFIX@.sleepwatcher.plist (root:wheel 644)
 
-	     이 파일은 템플릿이다. install.sh 가 설정값과 실제 sleepwatcher 경로로
-	     치환해 배치한다 — 플레이스홀더가 남아 있는 파일을 직접 복사하지 말 것.
+	     This file is a template. install.sh substitutes the configuration values
+	     and the real sleepwatcher path, then deploys it — never copy a file that
+	     still has placeholders in it.
 
-	     brew services 대신 자체 LaunchDaemon으로 운영한다:
-	       · brew가 생성하는 plist는 upgrade/restart 시 재생성되어 수정이 소실된다
-	       · smb-guard와 같은 system 도메인 = 같은 UID·같은 로그 경로·sudoers 불필요
-	       · 로그아웃/로그인 화면 상태의 슬립·웨이크도 커버된다
+	     It is run as our own LaunchDaemon instead of via brew services:
+	       - the plist brew generates is regenerated on upgrade/restart, losing edits
+	       - the same system domain as smb-guard = same UID, same log path, no sudoers
+	       - sleep and wake at the logout/login window are covered too
 
-	     ProgramArguments 는 셸을 거치지 않으므로 ~ 와 $HOME 이 확장되지 않는다.
-	     반드시 절대경로를 쓴다. 옵션과 값은 각각 별개의 <string> 이어야 한다.
+	     ProgramArguments does not go through a shell, so ~ and $HOME are not
+	     expanded. Always use absolute paths. An option and its value must each be a
+	     separate <string>.
 
-	     sleepwatcher 바이너리 경로는 아키텍처에 따라 다르다:
+	     The sleepwatcher binary path differs by architecture:
 	       Apple Silicon : /opt/homebrew/sbin/sleepwatcher
 	       Intel         : /usr/local/sbin/sleepwatcher
-	     install.sh 가 탐지해 치환하고, 찾지 못하면 중단한다. -->
+	     install.sh discovers and substitutes it, and aborts if it cannot find it. -->
 	<key>Label</key>
 	<string>@LABEL_PREFIX@.sleepwatcher</string>
 	<key>ProgramArguments</key>
@@ -35,12 +37,13 @@
 	<true/>
 	<key>ProcessType</key>
 	<string>Background</string>
-	<!-- 상주 프로세스이므로 이 파일의 fd를 계속 붙잡는다. newsyslog 회전 시
-	     이동한 inode에 계속 쓰게 되므로, -V(verbose)를 켜지 않아 출력을 최소로 유지한다.
+	<!-- Being a resident process, it holds this file's fd open. On a newsyslog
+	     rotation it would keep writing to the moved inode, so -V (verbose) is left
+	     off to keep the output minimal.
 
-	     stdout도 같은 파일로 모은다. 훅 스크립트는 sleepwatcher의 stdout/stderr를
-	     상속하므로, StandardOutPath가 없으면 훅이 exec 리다이렉션에 도달하기 전에
-	     낸 출력이 통째로 사라진다. -->
+	     stdout is collected into the same file. Hook scripts inherit sleepwatcher's
+	     stdout/stderr, so without StandardOutPath anything a hook emits before it
+	     reaches its exec redirection would be lost entirely. -->
 	<key>StandardOutPath</key>
 	<string>@LOGDIR@/sleepwatcher.launchd.log</string>
 	<key>StandardErrorPath</key>

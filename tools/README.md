@@ -1,107 +1,130 @@
-# 진단·역사적 도구
+# Diagnostic and historical tools
 
-**배포 대상이 아니다.** install 이 설치하지 않으며, 이 디렉터리에서 직접 실행한다.
+**Not deployment targets.** The installer does not place them; run them from this
+directory.
 
-두 종류가 섞여 있다. **`doctor.sh` 와 `probe-rename-collision.sh` 는 현역**이다 —
-구성이 바뀔 때마다 다시 돌릴 값어치가 있다. 나머지는 역할이 끝난 것들이고, 삭제하지
-않은 이유는 문서가 이 스크립트들의 출력을 근거로 삼고 있기 때문이다 — 지우면 근거가
-끊긴다.
+Two kinds are mixed here. **`doctor.sh` and `probe-rename-collision.sh` are in
+active use** — worth re-running whenever the configuration changes. The rest have
+finished their job; they are kept because the documentation cites their output as
+evidence, and deleting them would cut that evidence off.
 
-## `doctor.sh` (현역)
+## `doctor.sh` (active)
 
-호스트(macOS) 구성의 생존 점검. **읽기 전용** — 아무것도 고치지 않고, 항목별로 처방
-명령만 안내한다(원칙 21 — 감사하되 자동 교정하지 않는다).
+Survival check of the host (macOS) configuration. **Read-only** — it fixes nothing
+and only prints the remedy command for each item (Principle 21 — audit, but never
+remediate automatically).
 
-주 용도는 **macOS 메이저 업그레이드 직후의 원복 탐지**다. 업그레이드는 이 체계의
-전제를 두 방향에서 무너뜨릴 수 있다:
+Its main use is **detecting reversion right after a macOS major upgrade**. An
+upgrade can undermine this system's premises from two directions:
 
-- `/etc/auto_master`·`/etc/autofs.conf` 는 Apple 배포 파일이라 기본값으로 되돌아갈 수
-  있다. autofs 3종은 정확히 install 이 관리하지 않는 영역이어서 재설치 한 번으로
-  복구되지 않는다 — 검사가 설치와 별도 도구인 이유다.
-- 백그라운드 항목 승인(BTM)이 리셋되면 LaunchDaemon 이 **"파일은 있는데 로드 안 됨"**
-  이 된다. 파일 존재가 아니라 `launchctl` 의 실제 로드 상태로 판정한다.
+- `/etc/auto_master` and `/etc/autofs.conf` are Apple-distributed files and can
+  revert to defaults. The autofs trio is exactly the area the installer does not
+  manage, so a single reinstall does not restore it — which is why the check is a
+  tool separate from the install.
+- When Background Items approval (BTM) is reset, a LaunchDaemon ends up **"file
+  present but not loaded"**. The verdict comes from `launchctl`'s actual load
+  state, not from file existence.
 
-그 외에 배치물의 소유·권한(틀리면 조용히 무시된다), 레포 대비 내용 드리프트,
-newsyslog 등록, root 컨텍스트 게스트 ssh(최우선 검증), 마운트 상태를 본다.
+Beyond that it looks at ownership and permissions of the deployed files (wrong
+ones are silently ignored), content drift against the repo, newsyslog
+registration, guest ssh in a root context (the top-priority check), and the mount
+state.
 
 ```bash
-sudo ./doctor.sh                  # 완결 판정 (root)
-./doctor.sh                       # root 필요 항목은 skip 으로 표시된다
+sudo ./doctor.sh                  # complete verdict (root)
+./doctor.sh                       # root-only items are marked as skipped
 ```
 
-| 종료 코드 | 의미 |
+| Exit code | Meaning |
 |---|---|
-| 0 | 검사한 범위 전부 정상 (WARN 은 있을 수 있다) |
-| 1 | 이상 1건 이상 |
-| 2 | 이상은 없으나 root 필요 항목을 건너뜀 — 판정 불완전 |
+| 0 | everything within the checked scope is fine (WARNs may be present) |
+| 1 | one or more faults |
+| 2 | no faults, but root-only items were skipped — verdict incomplete |
 
-0 과 2 를 구분하는 이유: 건너뛴 항목의 조용함을 정상으로 읽으면 안 되기 때문이다
-(원칙 25). 한계 — autofs 는 파일 내용만 본다(반영 여부 `automount -vc` 는 읽기 전용으로
-판정 불가). StartOnMount 훅이 실제로 걸렸는지는 `launchctl print` 로 구분할 수 없으므로,
-마운트 동작까지 포함한 검증은 [install.md](../docs/install.md) '검증' 절차를 따른다.
+Why 0 and 2 are distinguished: the silence of a skipped item must not be read as
+healthy (Principle 25). Limits — for autofs it only reads file contents (whether
+`automount -vc` has been applied cannot be determined read-only). Whether the
+StartOnMount hook is actually armed cannot be distinguished via `launchctl print`,
+so verification that includes mount behaviour follows the 'Verification' procedure
+in [install.md](../docs/install.md).
 
-## `probe-rename-collision.sh` (현역)
+## `probe-rename-collision.sh` (active)
 
-[층 6](../docs/failure-model.md#층-6--공유-루트-이름-충돌)의 판별·회귀 확인. 공유 루트의
-엔트리 이름을 게스트에서 받아, 그 이름들로 마운트 위에서 덮어쓰기 rename 을 실제로 시도한다.
-**실패한 이름이 곧 오염된 basename 집합**이다 — 그 이름을 가진 기존 파일은 트리 어디에서도
-덮어쓰거나 지울 수 없다.
+Determination and regression check for Layer 6, share root name collision
+([failure-model.md](../docs/failure-model.md)). It fetches the share root's entry
+names from the guest and actually attempts an overwriting rename with each of them
+on the mount. **The names that fail are exactly the contaminated basename set** —
+existing files with those names cannot be overwritten or deleted anywhere in the
+tree.
 
 ```bash
-./probe-rename-collision.sh                 # /usr/local/etc/smb-guard.conf 를 읽는다
+./probe-rename-collision.sh                 # reads /usr/local/etc/smb-guard.conf
 ./probe-rename-collision.sh --config ./smb-guard.conf
 ```
 
-판정 기준은 배치에 따라 다르다.
+What counts as a pass depends on the layout.
 
-| 배치 | 기대 결과 | 종료 코드 |
+| Layout | Expected result | Exit code |
 |---|---|---|
-| 공유 루트 = 워크스페이스 (미조치) | 루트의 **거의 모든 이름이 실패** — `.git/config` 가 깨지는 상태 | 1 |
-| 공유 루트 = 워크스페이스 상위 (처방 적용) | **워크스페이스 이름 하나만 실패**, `기대된 잔여` 로 표시된다 | **0** |
-| 상향 배치인데 그 밖의 이름도 실패 | 공유 루트에 워크스페이스 외의 것이 생겼다 | 1 |
+| share root = workspace (unremediated) | **nearly every name at the root fails** — the state in which `.git/config` breaks | 1 |
+| share root = above the workspace (remedy applied) | **only the workspace name fails**, shown as `expected residue` | **0** |
+| raised layout but other names fail too | something other than the workspace appeared at the share root | 1 |
 
-**기대된 잔여는 오염으로 세지 않는다.** 공유 루트를 상향한 배치에서 워크스페이스 자신의
-이름이 남는 것은 정상이며, 그것을 오염으로 보고하면 정상 상태가 매번 경보를 울려 진짜
-이상도 함께 무시된다(설계 원칙 23).
+**The expected residue is not counted as contamination.** In a raised layout the
+workspace's own name remaining is normal, and reporting it as contamination would
+make the healthy state raise an alarm every time, so real faults would get ignored
+along with it (Principle 23).
 
-`root` 불필요이고 아무것도 지우지 않는다. **대조군이 성공해야 측정이 유효하다** — 대조군까지
-실패하면 마운트나 권한 문제이지 이 결함이 아니다(원칙 25).
+No root needed, and it deletes nothing. **The measurement is only valid if the
+control succeeds** — if even the control fails, the problem is the mount or
+permissions, not this defect (Principle 25).
 
-회수는 게스트에서 한다. 임시 디렉터리 안에 오염된 basename 이 들어 있어 **맥에서 `rm -rf`
-하면 정리 자체가 같은 결함에 걸리기 때문**이다 — 이 도구가 스스로 실증한 사례다.
+Reclamation happens on the guest. The temporary directory contains contaminated
+basenames, so **an `rm -rf` from the Mac would catch the cleanup itself in the same
+defect** — a case this tool demonstrated on itself.
 
 ## `probe-layer4b.sh`
 
-데몬 컨텍스트에서만 `umount -f` 가 EPERM 이던 현상([층 4-b](../docs/failure-model.md#층-4-b--데몬-컨텍스트의-umount-거부-원인-미확정))의
-원인을 좁히기 위한 일회용 판별 도구다. 감시 데몬을 정지시키고 소유권 이상을 인위적으로
-만든 뒤 두 라운드(지연 후 / 즉시)로 언마운트를 시도한다.
+A one-off tool for narrowing down the cause of Layer 4b, where `umount -f`
+returned EPERM only in a daemon context
+([failure-model.md](../docs/failure-model.md)). It stops the watch daemon, creates
+an ownership fault artificially, and then attempts an unmount in two rounds
+(delayed, then immediate).
 
-이 도구로 가설 5건 중 2건(마운트 소유자, 타이밍)을 기각했고, 부수적으로 **하이재킹이
-경합이라는 사실**을 발견했다 — 언마운트 직후의 빈 창에서 사용자 프로세스가 먼저 트리거하면
-소유권 이상 자체가 만들어지지 않았다. 실패한 재현이 간헐성의 설명이 된 사례다.
+With this tool 2 of 5 hypotheses were rejected (the mount's owner, and timing), and
+as a by-product it revealed **that hijacking is a race** — when a user process
+triggered first in the empty window right after an unmount, the ownership fault was
+never created at all. A case where a failed reproduction became the explanation for
+the intermittency.
 
-재현 실험의 위험이 그대로 있으므로(감시 정지, 인위적 언마운트) 재발 조사 때만 쓴다.
-EXIT trap 으로 데몬과 마운트를 복구한다.
+The hazards of a reproduction experiment are still there (stopping the watch,
+unmounting artificially), so use it only when investigating a recurrence. It
+restores the daemon and the mount via an EXIT trap.
 
-> 이 스크립트는 설정 외부화 이전에 작성되어 경로·계정이 상단 변수로 하드코딩되어 있다.
-> 쓰기 전에 `MP`·`OWNER`·`LABEL` 을 자신의 환경으로 맞춘다.
+> This script predates the externalisation of the configuration, so paths and the
+> account are hardcoded as variables at the top. Set `MP`, `OWNER` and `LABEL` to
+> your own environment before use.
 
 ## `cleanup.sh`
 
-홈 디렉터리에 흩어져 있던 구 배치(사용자 도메인 훅, brew 서비스, 이원화된 로그)를
-회수하는 마이그레이션 도구다. 그 이행은 끝났으므로 **새로 설치하는 환경에서는 쓸 일이
-없다.**
+A migration tool that reclaims the old deployment scattered around the home
+directory (user-domain hooks, the brew service, the split logs). That migration is
+finished, so **a fresh installation never needs it.**
 
-남겨 둔 이유는 두 교훈의 출처이기 때문이다.
+It is kept because it is the source of two lessons.
 
-- **`set -e` 하에서 명령치환 할당은 셸을 침묵 종료시킨다.** 정리 스크립트가 말없이 죽으면
-  부분 삭제 상태로 남는다 — 최악의 실패 양식이다. → 설계 원칙 20
-- **EXIT trap 이 오탐했다.** 마지막 문장이 `[ cond ] && cmd` 이고 cond 가 거짓이면 그 1이
-  스크립트의 종료 코드가 되어, 정상 완료를 오류로 보고한다. 실패를 알리는 장치가
-  오탐하면 다음번 진짜 실패도 무시된다. → 설계 원칙 23
+- **Under `set -e`, an assignment from a command substitution exits the shell
+  silently.** A cleanup script that dies without a word leaves a partially deleted
+  state — the worst failure mode there is. -> Principle 20
+- **The EXIT trap false-positived.** When the last statement is `[ cond ] && cmd`
+  and cond is false, that 1 becomes the script's exit code and a normal completion
+  is reported as an error. If the mechanism that announces failure
+  false-positives, the next real failure gets ignored too. -> Principle 23
 
-sudoers 를 **감사하되 자동 교정하지 않는** 설계도 여기서 나왔다. 권한이 틀려 무시돼 온
-파일을 "고치는" 것은 한 번도 부여된 적 없는 권한을 새로 여는 일이다(원칙 21).
+The design of **auditing sudoers without remediating it** came from here as well.
+"Fixing" a file that has been ignored because its permissions were wrong means
+newly opening a privilege that was never granted (Principle 21).
 
-> 이 스크립트도 계정·경로가 하드코딩되어 있다. 실행 전 `OWNER` 를 확인할 것.
-> 기본은 dry-run 이며 `--apply` 를 붙여야 실제로 지우고, 삭제 전 백업한다.
+> This script also has the account and paths hardcoded. Check `OWNER` before
+> running it. It is dry-run by default; `--apply` is required to actually delete,
+> and it backs things up before deletion.

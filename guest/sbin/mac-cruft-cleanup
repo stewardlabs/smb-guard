@@ -1,64 +1,78 @@
 #!/bin/bash
 # /usr/local/sbin/mac-cruft-cleanup
 #
-# macOS Finder 가 SMB 공유에 남기는 잔재를 주기적으로 회수한다.
-# smb.conf 의 `veto files` 를 대체한다 — docs/decisions.md 의 '차단 폐지' 결정.
+# Periodically reclaims the cruft that the macOS Finder leaves on an SMB share.
+# Replaces `veto files` in smb.conf — the 'abolish blocking' decision in
+# docs/decisions.md.
 #
-# v1.2: 순회 제외 목록을 PRUNE_NAMES 로 분리하고 빌드 산출물을 기본 포함.
-#       워크스페이스 루트가 단일 레포가 아니라 **여러 레포가 다양한 깊이에
-#       존재하는 트리**인 경우가 흔하다. 레포마다 target/ 이
-#       있으므로 순회 비용의 대부분이 빌드 산출물이었다 — 실측 표본에서
-#       733 항목 중 714가 target/·node_modules/ 였다(97%).
-#       그 안의 .DS_Store 를 남겨두는 대가는 사실상 없다: 빌드 산출물은 이미
-#       전역 git ignore 대상이라 이력을 오염시키지 않고, cargo clean 으로 함께
-#       사라진다. 비용만 있고 이득이 없는 순회였다.
-#       주의: 소스 트리에 우연히 'target' 이라는 이름의 디렉터리가 있으면 그
-#       안의 잔재도 남는다. 무해하지만(전역 ignore 대상), 신경 쓰이면
-#       PRUNE_NAMES 에서 target 을 빼면 된다.
-# v1.1: 디렉터리 회수 목록에 .DocumentRevisions-V100 추가 — 전역 git ignore
-#       정본과 대상 집합을 일치시킨다. 로직 변경 없음.
+# v1.2: split the sweep exclusion list out into PRUNE_NAMES and included build
+#       artefacts by default. A workspace root is often not a single repository
+#       but **a tree with several repositories at various depths**. Every
+#       repository has its own target/, so most of the sweep cost was build
+#       artefacts — in a measured sample, 714 of 733 entries were under target/
+#       or node_modules/ (97%).
+#       Leaving the .DS_Store files inside them costs effectively nothing: build
+#       artefacts are already covered by the global git ignore, so they do not
+#       pollute history, and they disappear with cargo clean. It was a sweep with
+#       cost and no benefit.
+#       Note: if a source tree happens to contain a directory literally named
+#       'target', cruft inside it is also left behind. Harmless (it is covered by
+#       the global ignore), but drop target from PRUNE_NAMES if it bothers you.
+# v1.1: added .DocumentRevisions-V100 to the directory reclamation list — aligns
+#       the target set with the canonical global git ignore. No logic change.
 #
-# 왜 차단이 아니라 정리인가:
-#   Finder CopyEngine 은 .DS_Store 쓰기 실패를 복사 작업 전체의 치명적 오류로
-#   취급한다(-8062). 서버에서 막으면 Finder 의 주 기능이 죽는다. 원하는 것은
-#   "결과 상태의 청결"이고, 그 처방은 사후 정리다 (§9 원칙 26).
-#   정리는 실패해도 아무것도 깨뜨리지 않는다 — 그것이 차단과의 결정적 차이다.
+# Why cleanup rather than blocking:
+#   The Finder's CopyEngine treats a failed .DS_Store write as a fatal error for
+#   the entire copy operation (-8062). Blocking it at the server kills the
+#   Finder's primary function. What is wanted is "cleanliness of the resulting
+#   state", and the remedy for that is post-hoc cleanup (§9, Principle 26).
+#   Cleanup breaks nothing when it fails — that is the decisive difference from
+#   blocking.
 #
-# 출력 규약:
-#   제거가 0건이면 아무것도 출력하지 않는다(로그가 조용하다).
-#   1건 이상이면 요약 한 줄을 stdout 으로 낸다 → systemd 가 journald 로 수집한다.
-#   이 한 줄이 §6 의 관찰 채널이다: .DS_Store 가 매번 다량이면 맥의
-#   DSDontWriteNetworkStores 억제가 실효 중이지 않다는 신호다(기능 고장은 아니다).
-#   **주의(원칙 25)**: 회수 대상이 없어서 조용한 것과 고장으로 조용한 것은
-#   출력으로 구분되지 않는다. 실증할 때는 대상을 남겨 둔 채 실행할 것.
+# Output convention:
+#   Prints nothing when zero items were removed (the log stays quiet).
+#   For one or more, emits a one-line summary on stdout → systemd collects it into
+#   journald.
+#   That one line is the observation channel of §6: a large .DS_Store count every
+#   time signals that the Mac's DSDontWriteNetworkStores suppression is not in
+#   effect (not a functional failure).
+#   **Caution (Principle 25)**: silence because there was nothing to reclaim and
+#   silence because of a fault are indistinguishable in the output. When
+#   demonstrating this, run it with targets deliberately left in place.
 #
-# usage: mac-cruft-cleanup [워크스페이스_경로] [공유루트_경로]
-#   경로는 인자 > /etc/smb-guard.conf 의 SMBG_GUEST_ROOT / SMBG_EXPORT_ROOT 순으로
-#   결정한다.
-#   **기본 경로를 코드에 박지 않는다** — 엉뚱한 트리를 훑고 지우는 것보다 실패가 낫다.
+# usage: mac-cruft-cleanup [workspace_path] [share_root_path]
+#   Paths are resolved in the order: argument > SMBG_GUEST_ROOT / SMBG_EXPORT_ROOT
+#   in /etc/smb-guard.conf.
+#   **No default path is hardcoded** — failing beats sweeping and deleting in the
+#   wrong tree.
 #
-#   2번째 경로(공유 루트)는 워크스페이스보다 위에 있을 수 있다. Finder 는 잔재를
-#   **마운트된 공유의 루트에** 만들므로, 공유 루트를 올리면 잔재도 함께 올라가
-#   워크스페이스 순회만으로는 닿지 않는다. 그래서 공유 루트는 깊이 1 로 한 번 더
-#   훑는다 — 순회 비용은 사실상 0 이고, 두 값이 같으면(공유 루트를 올리지 않은
-#   기존 배포) 이 스윕은 통째로 건너뛴다.
+#   The second path (the share root) may sit above the workspace. The Finder
+#   creates cruft **at the root of the mounted share**, so raising the share root
+#   raises the cruft with it, out of reach of a workspace-only sweep. Hence the
+#   share root gets one extra sweep at depth 1 — the traversal cost is
+#   effectively zero, and when the two values are equal (an existing deployment
+#   that did not raise the share root) this sweep is skipped entirely.
 #
-#   환경변수(설정 파일보다 우선한다 — 일회성 오버라이드용):
-#     TRASH_AGE_DAYS=7                    .Trashes 유예 기간
+#   Environment variables (they take precedence over the configuration file — for
+#   one-off overrides):
+#     TRASH_AGE_DAYS=7                    .Trashes grace period
 #     PRUNE_NAMES=".git .Trashes target node_modules"
-#                                         순회에서 통째로 건너뛸 디렉터리 이름.
-#                                         경로가 아니라 **이름** 기준이므로 깊이와
-#                                         무관하게 적용된다 — 다중 레포 구조에서
-#                                         모든 .git / target 이 자동으로 제외된다.
-#                                         .Trashes 는 아래 3)에서 별도 정책으로
-#                                         다루므로 목록에서 빼지 말 것.
+#                                         Directory names to skip wholesale during
+#                                         the sweep. Matched by **name**, not by
+#                                         path, so it applies regardless of depth —
+#                                         in a multi-repository layout every .git
+#                                         and target is excluded automatically.
+#                                         .Trashes is handled by a separate policy
+#                                         in 3) below, so do not remove it from
+#                                         the list.
 #
-# 멱등하다. 수동 실행 가능. root 로 실행한다.
+# Idempotent. Can be run by hand. Runs as root.
 
 set -uo pipefail
 
-# 환경변수 오버라이드가 설정 파일보다 우선하도록 먼저 보존한다.
-# (설정 파일은 source 되므로 그대로 두면 환경변수를 덮어쓴다)
+# Preserve the environment overrides first so they win over the configuration
+# file. (The configuration file is sourced, so leaving them would let it
+# overwrite the environment variables.)
 _env_trash="${TRASH_AGE_DAYS:-}"
 _env_prune="${PRUNE_NAMES:-}"
 
@@ -67,23 +81,24 @@ SMBG_CONF="${SMBG_CONF:-/etc/smb-guard.conf}"
 
 ROOT="${1:-${SMBG_GUEST_ROOT:-}}"
 if [ -z "$ROOT" ]; then
-    echo "usage: mac-cruft-cleanup <워크스페이스_경로> [공유루트_경로]" >&2
-    echo "       (또는 $SMBG_CONF 에 SMBG_GUEST_ROOT 를 설정)" >&2
+    echo "usage: mac-cruft-cleanup <workspace_path> [share_root_path]" >&2
+    echo "       (or set SMBG_GUEST_ROOT in $SMBG_CONF)" >&2
     exit 2
 fi
 
-# 공유 루트. 미지정이면 워크스페이스 자신으로 폴백하고, 그 경우 아래 4) 는 건너뛴다.
+# Share root. Falls back to the workspace itself when unspecified, in which case
+# 4) below is skipped.
 EXPORT_ROOT="${2:-${SMBG_EXPORT_ROOT:-$ROOT}}"
 
 TRASH_AGE_DAYS="${_env_trash:-${TRASH_AGE_DAYS:-7}}"
 PRUNE_NAMES="${_env_prune:-${PRUNE_NAMES:-.git .Trashes target node_modules}}"
 
 if [ ! -d "$ROOT" ]; then
-    echo "mac-cruft-cleanup: '$ROOT' 가 없다 — 중단" >&2
+    echo "mac-cruft-cleanup: '$ROOT' does not exist — aborting" >&2
     exit 1
 fi
 
-# PRUNE_NAMES 를 find 표현식으로 조립한다:
+# Assemble PRUNE_NAMES into a find expression:
 #   ( -type d ( -name A -o -name B ... ) ) -prune -o
 PRUNE=( '(' -type d '(' )
 _first=1
@@ -93,20 +108,21 @@ for _n in $PRUNE_NAMES; do
 done
 PRUNE+=( ')' ')' -prune -o )
 
-# 1) 파일류 — 즉시 회수
-#    ._*   : AppleDouble (fruit:resource = file 의 산물). 리소스 포크가 실제로
-#            있는 파일은 이 워크스페이스(Rust/git)에 사실상 존재하지 않는다.
+# 1) Files — reclaimed immediately
+#    ._*   : AppleDouble (a product of fruit:resource = file). Files that actually
+#            carry a resource fork effectively do not exist in this workspace
+#            (Rust/git).
 #
-#    -delete 를 쓰지 않는 이유: GNU find 의 -delete 는 -depth 를 자동으로 켜고,
-#    -depth 가 켜지면 -prune 이 무력화된다(find 가 아예 거부한다). 순회 제외를
-#    포기할 수 없으므로 삭제는 -exec rm 으로 한다. 08-14 실측으로 확인.
+#    Why not -delete: GNU find's -delete turns on -depth automatically, and with
+#    -depth on, -prune is disabled (find refuses outright). Sweep exclusion is not
+#    negotiable, so deletion goes through -exec rm. Confirmed by measurement on 08-14.
 n_file=$(find "$ROOT" -xdev "${PRUNE[@]}" \
     -type f '(' -name '.DS_Store' -o -name '._*' -o -name '.apdisk' ')' \
     -print -exec rm -f -- '{}' + 2>/dev/null | wc -l)
 
-# 2) 디렉터리류 — 통째로 회수
-#    매칭된 디렉터리에 -prune 을 먼저 걸어, 삭제한 디렉터리로 find 가 하강해
-#    오류를 뱉는 것을 막는다.
+# 2) Directories — reclaimed wholesale
+#    -prune is applied to a matched directory first, to stop find from descending
+#    into a directory it has just deleted and emitting errors.
 n_dir=$(find "$ROOT" -xdev "${PRUNE[@]}" \
     -type d '(' -name '.TemporaryItems' -o -name '.fseventsd' \
               -o -name '.Spotlight-V100' -o -name '.DocumentRevisions-V100' \
@@ -114,15 +130,16 @@ n_dir=$(find "$ROOT" -xdev "${PRUNE[@]}" \
               -o -name '.AppleDesktop' ')' \
     -prune -print -exec rm -rf -- '{}' + 2>/dev/null | wc -l)
 
-# 3) .Trashes — 즉시 삭제하지 않는다.
-#    되돌릴 수 없는 휴지통은 휴지통이 아니다. Finder 의 "휴지통으로 이동"이
-#    사실상의 즉시 삭제가 되면 사용자가 그것을 신뢰할 수 없다 (§8 v17).
-#    mindepth/maxdepth 2 = .Trashes/<uid>/<항목>. uid 디렉터리 자체는 보존한다.
+# 3) .Trashes — not deleted immediately.
+#    A trash you cannot undo is not a trash. If the Finder's "Move to Trash"
+#    becomes an effective immediate delete, the user cannot trust it (§8 v17).
+#    mindepth/maxdepth 2 = .Trashes/<uid>/<item>. The uid directory itself is kept.
 #
-#    **Finder 는 마운트된 공유의 루트에 .Trashes 를 만든다.** 공유 루트가 곧 $ROOT
-#    이던 시절에는 여기만 보면 됐지만, 공유 루트를 워크스페이스 위로 올린 뒤로는
-#    $EXPORT_ROOT 도 함께 봐야 한다 — 그래서 함수로 뽑아 4) 에서 재사용한다.
-trash_sweep() {   # trash_sweep <루트> → 회수 건수를 stdout 으로
+#    **The Finder creates .Trashes at the root of the mounted share.** Back when
+#    the share root was $ROOT this was the only place to look, but since the share
+#    root moved above the workspace, $EXPORT_ROOT has to be looked at too — hence
+#    this is factored into a function and reused in 4).
+trash_sweep() {   # trash_sweep <root> → prints the reclaimed count on stdout
     if [ ! -d "$1/.Trashes" ]; then echo 0; return; fi
     find "$1/.Trashes" -xdev -mindepth 2 -maxdepth 2 \
         -mtime "+${TRASH_AGE_DAYS}" \
@@ -130,17 +147,19 @@ trash_sweep() {   # trash_sweep <루트> → 회수 건수를 stdout 으로
 }
 n_trash=$(trash_sweep "$ROOT")
 
-# 4) 공유 루트 — 깊이 1 만 훑는다.
-#    공유 루트를 올리지 않았다면($EXPORT_ROOT == $ROOT) 위에서 이미 다 훑었으므로
-#    건너뛴다. 중복 삭제는 무해하지만 집계가 이중으로 잡힌다.
+# 4) Share root — swept at depth 1 only.
+#    If the share root was not raised ($EXPORT_ROOT == $ROOT) everything was
+#    already swept above, so skip. Duplicate deletion would be harmless but would
+#    double-count the totals.
 #
-#    -maxdepth 1 이라 순회 비용이 사실상 0 이다. -xdev 는 워크스페이스가 별도
-#    파일시스템으로 bind mount 된 경우 그 경계에서 멈추게 한다 — 깊이 제한과
-#    이중으로 안전장치가 된다.
+#    With -maxdepth 1 the traversal cost is effectively zero. -xdev stops at the
+#    boundary when the workspace is bind-mounted as a separate filesystem — a
+#    second safeguard alongside the depth limit.
 #
-#    주의: 이 스윕이 실제로 지우려면 systemd 유닛의 ReadWritePaths 에 공유 루트가
-#    있어야 한다. ProtectSystem=strict 아래에서는 없는 경로가 읽기 전용이고,
-#    삭제 실패는 여기서 조용히 무시된다(2>/dev/null).
+#    Caution: for this sweep to actually delete anything, the share root must be
+#    in the systemd unit's ReadWritePaths. Under ProtectSystem=strict a path not
+#    listed there is read-only, and the deletion failure is silently swallowed
+#    here (2>/dev/null).
 n_export=0
 if [ "$EXPORT_ROOT" != "$ROOT" ] && [ -d "$EXPORT_ROOT" ]; then
     n_e_file=$(find "$EXPORT_ROOT" -xdev -maxdepth 1 \
@@ -162,9 +181,9 @@ total=$(( n_file + n_dir + n_trash + n_export ))
 
 if [ "$total" -gt 0 ]; then
     _export_note=""
-    [ "$n_export" -gt 0 ] && _export_note=" / 공유루트 ${n_export} @ ${EXPORT_ROOT}"
-    echo "mac-cruft-cleanup: 제거 ${total}건" \
-         "(파일 ${n_file} / 디렉터리 ${n_dir} / 휴지통 ${n_trash}, 유예 ${TRASH_AGE_DAYS}일)" \
+    [ "$n_export" -gt 0 ] && _export_note=" / share root ${n_export} @ ${EXPORT_ROOT}"
+    echo "mac-cruft-cleanup: removed ${total}" \
+         "(files ${n_file} / dirs ${n_dir} / trash ${n_trash}, grace ${TRASH_AGE_DAYS}d)" \
          "@ ${ROOT}${_export_note}"
 fi
 

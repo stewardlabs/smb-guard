@@ -1,119 +1,145 @@
 # smb-guard
 
-macOS 호스트에 SMB 로 마운트한 작업 디렉터리가 **조용히 망가지는 것**을 막는다.
-자동 마운트(autofs) 위에서 마운트 소유권을 감시·교정하고, 가상 게스트의 시계를 웨이크
-직후 되돌리며, Finder 가 남기는 잔재를 서버측에서 사후 회수한다.
+Keeps a working directory mounted over SMB on a macOS host from **breaking
+silently**. It watches and remediates mount ownership on top of an automounter
+(autofs), rolls a virtual guest's clock back right after wake, and reclaims the
+cruft the Finder leaves behind, server-side and after the fact.
 
-macOS 호스트에서 개발하고 파일은 Linux VM(또는 파일 서버)에 두는 구성 — 즉
-**호스트의 편집기와 게스트의 툴체인이 같은 트리를 봐야 하는 환경**을 대상으로 한다.
+It targets setups where you develop on a macOS host but the files live on a Linux
+VM (or a file server) — that is, **an environment where the host's editor and the
+guest's toolchain must see the same tree**.
 
-## 무엇이 문제인가
+## What goes wrong
 
-SMB 마운트는 "끊어지거나 붙어 있거나" 둘 중 하나가 아니다. 그 사이에 **무증상 고장**들이 있다.
+An SMB mount is not simply either "broken" or "attached". In between there are
+**asymptomatic failures**.
 
-- **소유권 하이재킹** — Time Machine 의 `backupd` 같은 root 프로세스가 자동 마운트를
-  먼저 건드리면, 마운트가 root 소유로 성립한다. 사용자 프로세스는 그때부터 `EACCES` 를
-  받는다. 사용자별 마운트가 공존하지 못하므로 스스로 낫지 않는다.
-- **유휴 만료 창** — autofs 는 마지막 사용이 아니라 **마운트 시각** 기준으로 만료시킨다.
-  기본 1시간이라 하이재킹 창이 매시간 열린다.
-- **게스트 시계 정지** — 호스트가 자면 게스트 시계도 멈춘다. 깨어난 뒤 수천 초 어긋난
-  시계로 파일을 쓰면 mtime 이 미래가 되고, mtime 기반 빌드 도구(cargo 등)가 소스 변경을
-  **침묵 무시**한다.
-- **서버 로컬 쓰기는 클라이언트 캐시에 비가시적** — 게스트가 쓴 파일을 맥이 캐시로
-  읽으면, 단발 읽기·에디터 재읽기·부분 읽기는 **무기한** 옛 내용을 반환한다. 에러가
-  없어 로그로도 안 보인다. 처방은 마운트 옵션 `nodatacache` (비용 실측 0).
-- **부수 파일 차단이 주 기능을 죽인다** — 서버에서 `.DS_Store` 쓰기를 막으면 Finder
-  CopyEngine 이 복사 작업 **전체**를 실패시킨다(오류 `-8062`). 대화상자는 실패한 경로를
-  알려주지 않아 권한·용량 문제로 오진하기 쉽다.
+- **Ownership hijacking** — when a root process such as Time Machine's `backupd`
+  touches the automount first, the mount is established as root-owned. From then on
+  user processes get `EACCES`. Per-user mounts cannot coexist, so it does not heal
+  itself.
+- **The idle expiry window** — autofs expires by **mount time**, not by last use.
+  The default is one hour, so the hijacking window opens every hour.
+- **The guest clock stops** — when the host sleeps, so does the guest's clock.
+  Writing files with a clock thousands of seconds off after waking puts mtimes in
+  the future, and mtime-based build tools (cargo and the like) **silently ignore**
+  source changes.
+- **Server-local writes are invisible to the client cache** — when the Mac reads a
+  file the guest wrote through the cache, one-shot reads, editor re-reads and
+  partial reads return the old content **indefinitely**. There is no error, so
+  nothing shows up in the logs either. The remedy is the mount option
+  `nodatacache` (measured cost: zero).
+- **Blocking incidental files kills the primary function** — blocking `.DS_Store`
+  writes at the server makes the Finder's CopyEngine fail the **entire** copy
+  operation (error `-8062`). The dialog does not name the path that failed, which
+  makes it easy to misdiagnose as a permissions or capacity problem.
 
-전부 "로그를 안 보면 모르는" 종류다. 자세한 인과와 실측 근거는
-[docs/failure-model.md](docs/failure-model.md) 를 볼 것 — 8개 층으로 정리했다.
+All of them are the kind you cannot see without reading the logs. For the causal
+detail and the measurements see
+[docs/failure-model.md](docs/failure-model.md) — organised into 8 layers.
 
-## 무엇을 하는가
+## What it does
 
-| 구성요소 | 위치 | 트리거 | 역할 |
+| Component | Where | Trigger | Role |
 |---|---|---|---|
-| `smb-guard` | 호스트 | 마운트 이벤트 (`StartOnMount`) | 소유권 판정, 하이재킹 즉시 교정 — **유일한 교정 주체** |
-| `smb-guard-sleep` | 호스트 | 수면 직전 | 직전 수면 시각 기록 (기록만 한다) |
-| `smb-guard-wakeup` | 호스트 | 웨이크 | 네트워크 대기 → 시계 교정 → 마운트 보장 → 생존성 확인 |
-| `smbfix` | 호스트 | 사람 | 자동 복구가 실패했을 때의 수동 도구 |
-| `clockfix` | 게스트 | 호스트 훅이 ssh 로 호출 | resume 직후 시계 step |
-| `mac-cruft-cleanup` | 게스트 | systemd 타이머 (15분) | macOS 잔재 사후 회수 |
+| `smb-guard` | host | mount event (`StartOnMount`) | ownership determination, immediate remediation of hijacking — **the sole remediation agent** |
+| `smb-guard-sleep` | host | just before sleep | records the time of the last sleep (nothing else) |
+| `smb-guard-wakeup` | host | wake | wait for network -> correct the clock -> assure the mount -> check liveness |
+| `smbfix` | host | a human | the manual tool for when automatic recovery has failed |
+| `clockfix` | guest | called over ssh by the host hook | clock step right after resume |
+| `mac-cruft-cleanup` | guest | systemd timer (15 min) | post-hoc reclamation of macOS cruft |
 
-설계 계약 세 가지가 이 체계를 지탱한다.
+Three design contracts hold this system up.
 
-- **판정은 mount 테이블만 읽는다.** 경로 접근(`ls`/`stat`)은 판정에 쓰지 않는다 — 그
-  자체가 자동 마운트를 트리거해 측정 대상을 바꾸고, 데몬 컨텍스트에서는 TCC 가 `readdir`
-  를 거부해 "마운트 실패"로 오판하게 만든다.
-- **교정 주체는 하나다.** 웨이크 훅도 수동 도구도 자체 마운트 로직을 갖지 않고
-  `smb-guard` 에 위임한다.
-- **차단이 아니라 정리로 청결을 얻는다.** 정리는 실패해도 아무것도 깨뜨리지 않지만,
-  차단은 실패하는 것이 곧 남의 기능이다.
+- **Determination reads the mount table only.** Path access (`ls`/`stat`) is never
+  used for it — that itself fires the automounter and changes what is being
+  measured, and in a daemon context TCC denies `readdir`, producing a false
+  "mount failed".
+- **There is a single remediation agent.** Neither the wake hook nor the manual
+  tool carries its own mount logic; both delegate to `smb-guard`.
+- **Cleanliness comes from cleanup, not from blocking.** Cleanup breaks nothing
+  when it fails, whereas what fails when blocking fails is someone else's feature.
 
-## 요구사항
+## Requirements
 
-- **호스트**: macOS, [sleepwatcher](https://www.bernhard-baehr.de/) (`brew install sleepwatcher`
-  — brew 서비스로 등록하지 말 것, 이 레포가 자체 LaunchDaemon 으로 배치한다)
-- **게스트**: Linux + Samba, systemd, 호스트에서 키 기반 ssh 로그인
-- 워크스페이스가 호스트에 **autofs 직접 맵**으로 마운트되어 있을 것
-- 게스트가 **고정 IP** 이고 호스트에서 그 주소로 이름이 해석될 것 (정적 `/etc/hosts` 권장)
+- **Host**: macOS, [sleepwatcher](https://www.bernhard-baehr.de/)
+  (`brew install sleepwatcher` — do not register it as a brew service; this repo
+  deploys its own LaunchDaemon)
+- **Guest**: Linux + Samba, systemd, key-based ssh login from the host
+- The workspace mounted on the host as an **autofs direct map**
+- The guest on a **static IP**, with that address resolvable by name from the host
+  (a static `/etc/hosts` entry is recommended)
 
-가상 게스트라면 **하이퍼바이저 게스트 통합 도구를 설치하지 않는다.** 시간 동기화가 게스트
-NTP 를 강제로 끄기 때문이며(층 1), 헤드리스 구성에서 나머지 기능은 쓰이지 않는다.
+On a virtual guest, **do not install the hypervisor's guest integration tools.**
+Their time synchronisation forcibly disables guest NTP (Layer 1), and in a headless
+setup none of the remaining features are used.
 
-물리 Linux 서버에도 쓸 수 있다. 그 경우 `clockfix` 와 chrony 설정은 불필요하다 —
-시계가 멈추는 것은 가상 게스트 고유의 문제다.
+It works on a physical Linux server too. There `clockfix` and the chrony
+configuration are unnecessary — a stopping clock is specific to virtual guests.
 
-## 빠른 시작
+## Quick start
 
 ```bash
 git clone https://github.com/stewardlabs/smb-guard.git
 cd smb-guard
 cp smb-guard.conf.example smb-guard.conf
-$EDITOR smb-guard.conf          # 계정·마운트 지점·게스트 별칭·공유명
+$EDITOR smb-guard.conf          # account, mount point, guest alias, share name
 
-./install.sh --dry-run          # 무엇을 어디에 배치할지 먼저 확인
-./install.sh                    # 호스트(sudo) → 게스트(ssh -t sudo)
+./install.sh --dry-run          # see what goes where first
+./install.sh                    # host (sudo) -> guest (ssh -t sudo)
 ```
 
-`install.sh` 는 **일반 사용자로** 실행한다. 권한 승격은 각 단계에서 따로 일어난다 —
-전체를 `sudo` 로 돌리면 ssh 가 root 의 `~/.ssh` 를 보게 되어 게스트 별칭이 해석되지 않는다.
+Run `install.sh` **as a normal user.** Privilege elevation happens separately at
+each stage — running the whole thing under `sudo` makes ssh look at root's `~/.ssh`,
+so the guest alias will not resolve.
 
-설치를 마쳤으면 **가장 먼저 이것을 확인한다.** 실패하면 시계 교정이 통째로 무력화된다:
+Once installed, **check this first.** If it fails, clock correction is disabled
+entirely:
 
 ```bash
-sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'date +%s'
+sudo -u <owner> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <guest> 'date +%s'
 ```
 
-배치·권한·로드 상태·autofs 를 한 번에 훑으려면 읽기 전용 점검 도구를 쓴다. **OS 메이저
-업그레이드 직후에도 이것부터 돌린다** — 업그레이드는 autofs 설정을 되돌리거나 백그라운드
-항목 승인을 리셋해, 파일은 그대로인데 잡이 죽어 있는 상태를 만든다.
+To sweep deployment, permissions, load state and autofs in one go, use the
+read-only inspection tool. **Run this first after a major OS upgrade as well** — an
+upgrade can revert the autofs configuration or reset Background Items approval,
+producing a state where the files are intact but the jobs are dead.
 
 ```bash
 sudo ./tools/doctor.sh
 ```
 
-설치 스크립트를 쓰지 않고 손으로 배치해도 된다 — [docs/install.md](docs/install.md) 에
-파일·목적지·소유자·권한 대조표가 있다. 다만 **권한을 정확히 맞춰야 한다.** 이 체계의
-지배적 실패 모드가 "권한이 틀리면 조용히 무시된다"이다: `newsyslog` 설정이 `root:wheel
-644` 가 아니면 말없이 무시되고, LaunchDaemon plist 가 그렇지 않으면 launchd 가 로드를
-거부한다.
+You can place everything by hand instead of using the install script —
+[docs/install.md](docs/install.md) has a table of files, destinations, owners and
+permissions. But **the permissions have to be exact.** The dominant failure mode of
+this system is "wrong permissions are silently ignored": a `newsyslog`
+configuration that is not `root:wheel 644` is ignored without a word, and a
+LaunchDaemon plist that is not will be refused by launchd.
 
-## 문서
+## Documentation
 
-| 문서 | 내용 |
+| Document | Contents |
 |---|---|
-| [docs/failure-model.md](docs/failure-model.md) | 8층 고장 모델과 에러 코드 지도 — **먼저 읽을 것** |
-| [docs/architecture.md](docs/architecture.md) | 구성 전문, 역할 분담, 설계 계약 |
-| [docs/install.md](docs/install.md) | 설치·검증 절차, 수동 배치 대조표 |
-| [docs/operations.md](docs/operations.md) | 관찰 항목과 진단 도구 |
-| [docs/decisions.md](docs/decisions.md) | 결정 기록과 설계 원칙 29개 |
-| [docs/open-questions.md](docs/open-questions.md) | 미결 과제와 잠복 위험 |
-| [docs/history/](docs/history/) | 개발 이력 원장 (실측 로그·기각된 가설 포함) |
+| [docs/failure-model.md](docs/failure-model.md) | the 8-layer failure model and the error code map — **read this first** |
+| [docs/architecture.md](docs/architecture.md) | full composition, role split, design contracts |
+| [docs/install.md](docs/install.md) | installation and verification procedures, manual placement table |
+| [docs/operations.md](docs/operations.md) | what to observe, and the diagnostic tools |
+| [docs/decisions.md](docs/decisions.md) | the decision log and 29 design principles |
+| [docs/open-questions.md](docs/open-questions.md) | open items and latent risks |
+| [docs/history/](docs/history/) | development ledger — **written in Korean**, see below |
 
-이 프로젝트의 가치는 스크립트보다 **고장 모델과 기각된 가설의 기록**에 있다. 같은 증상을
-겪는 사람이 이미 반증된 가설을 다시 검증하지 않아도 되게 하는 것이 목적이다.
+The value of this project is less in the scripts than in **the failure model and
+the record of rejected hypotheses**. The point is to spare someone with the same
+symptoms from re-testing a hypothesis that has already been refuted.
 
-## 라이선스
+> **A note on language.** Everything here is in English except `docs/history/`,
+> which is the development ledger — session-to-session handoffs holding raw
+> measurement logs and the reasoning as it happened. It stays in Korean because
+> translating it accurately is costly and its findings are already distilled into
+> [failure-model.md](docs/failure-model.md) and
+> [decisions.md](docs/decisions.md). Nothing you need in order to use, install or
+> debug this is only in there.
+
+## License
 
 [MIT](LICENSE)

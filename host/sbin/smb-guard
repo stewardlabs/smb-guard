@@ -1,19 +1,22 @@
 #!/bin/bash
 # /usr/local/sbin/smb-guard
-# 워크스페이스 smbfs 마운트의 소유자 감시·교정 — 유일한 교정 주체.
-# 대상 마운트 지점·소유자는 설정 파일(/usr/local/etc/smb-guard.conf)에서 온다.
+# Owner watch and remediation for the workspace smbfs mount — the sole
+# remediation agent. The target mount point and owner come from the
+# configuration file (/usr/local/etc/smb-guard.conf).
 #
-# 호출 경로별 모드:
-#   (없음)     watch   : LaunchDaemon(StartOnMount). FOREIGN 교정만. 마운트를 만들지 않는다.
-#   --ensure   ensure  : smb-guard-wakeup. 부재 시 소유자 트리거 포함.
-#   --remount  remount : smbfix. 상태 무관 강제 재마운트 (죽은 마운트 대응).
-#   --state    state   : 판정만 출력하고 종료. 부작용 없음 (디버깅/스크립팅용).
+# Modes, by invocation path:
+#   (none)     watch   : LaunchDaemon(StartOnMount). Remediates FOREIGN only. Never creates a mount.
+#   --ensure   ensure  : smb-guard-wakeup. Includes an owner trigger when absent.
+#   --remount  remount : smbfix. Forced remount regardless of state (for a dead mount).
+#   --state    state   : print the determination and exit. No side effects (debug/scripting).
 #
-# 설계 원칙 (핸드오프 문서 §8 계승):
-#   - 판정은 mount 테이블만 읽는다 (smbg_state, common.sh).
-#   - 트리거는 의도적인 디렉터리 open(ls) 한 가지뿐이며, 반드시 소유자 자격으로 실행한다.
-#   - watch 모드의 교정은 새 마운트 이벤트를 낳아 자기 자신을 재발화시키지만,
-#     재발화 인스턴스는 HEALTHY를 보고 즉시 종료하므로 루프가 종결된다.
+# Design principles (inherited from handoff document §8):
+#   - Determination reads the mount table only (smbg_state, common.sh).
+#   - The only trigger is one deliberate directory open (ls), and it always runs
+#     with the owner's credentials.
+#   - Remediation in watch mode produces a new mount event and thus re-fires this
+#     script, but the re-fired instance sees HEALTHY and exits immediately, so the
+#     loop terminates.
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
@@ -29,27 +32,29 @@ esac
 SMBG_TAG="$MODE"
 . /usr/local/lib/smb-guard/common.sh
 
-# 초. 맵의 soft 옵션 전제 — 서버 부재 시에도 유한 시간 내 실패한다. 설정 파일에서 온다.
+# Seconds. Presupposes the map's soft option — a missing server still fails
+# within finite time. Comes from the configuration file.
 TRIGGER_TIMEOUT="$SMBG_TRIGGER_TIMEOUT"
-LOCK_WAIT_ENSURE=30  # 초. ensure/remount는 조용히 물러나면 안 된다(아래 주석 참조).
+LOCK_WAIT_ENSURE=30  # Seconds. ensure/remount must not back off silently (see below).
 
-# --state 는 잠금도 필요 없다. 가장 먼저 처리하고 빠져나간다.
+# --state needs no lock either. Handle it first and get out.
 if [ "$MODE" = "state" ]; then smbg_state; exit 0; fi
 
 if ! smbg_is_root; then
-  echo "smb-guard: root 권한이 필요합니다 (sudo smb-guard $*)" >&2
+  echo "smb-guard: root privileges required (sudo smb-guard $*)" >&2
   exit 2
 fi
 
-# ── 잠금 ────────────────────────────────────────────────────────────────────
-# 유령 잠금 청소: 인스턴스가 SIGKILL 등으로 죽으면 EXIT trap이 돌지 않아
-# 잠금 디렉터리가 영구히 남고, 그때부터 guard 전체가 침묵한다(무증상 고장).
-# 트리거 최대 소요의 여유배수보다 오래된 잠금은 잔재로 간주한다.
+# ── Locking ────────────────────────────────────────────────────────────────
+# Ghost-lock sweep: when an instance dies from SIGKILL or the like the EXIT trap
+# never runs, the lock directory survives forever, and from then on the whole of
+# guard goes silent (an asymptomatic failure). A lock older than a generous
+# multiple of the worst-case trigger time is treated as cruft.
 if [ -d "$SMBG_LOCKDIR" ]; then
   _now=$(date +%s)
   _age=$(( _now - $(stat -f %m "$SMBG_LOCKDIR" 2>/dev/null || echo "$_now") ))
   if [ "$_age" -gt 120 ]; then
-    log "stale lock (${_age}s) 제거 — 죽은 인스턴스의 잔재"
+    log "removing stale lock (${_age}s) — cruft from a dead instance"
     rmdir "$SMBG_LOCKDIR" 2>/dev/null
   fi
 fi
@@ -66,55 +71,64 @@ acquire_lock() {
 }
 
 if [ "$MODE" = "watch" ]; then
-  # StartOnMount는 연속 발화한다(교정 자체가 이벤트를 낳음).
-  # 잠금을 못 얻은 인스턴스는 조용히 물러난다 — 이미 다른 인스턴스가 처리 중이다.
+  # StartOnMount fires repeatedly (remediation itself produces an event).
+  # An instance that cannot take the lock backs off silently — another instance
+  # is already handling it.
   acquire_lock 1 || exit 0
 else
-  # ensure/remount는 호출자(wakeup, smbfix)가 결과를 신뢰한다.
-  # 여기서 조용히 exit 0 하면 "아무것도 안 했는데 성공"이 되어 거짓 양성이 된다.
+  # For ensure/remount the caller (wakeup, smbfix) trusts the result.
+  # A silent exit 0 here would mean "succeeded without doing anything", i.e. a
+  # false positive.
   if ! acquire_lock "$LOCK_WAIT_ENSURE"; then
-    log "lock timeout (${LOCK_WAIT_ENSURE}s) — 다른 인스턴스가 점유 중"
+    log "lock timeout (${LOCK_WAIT_ENSURE}s) — another instance holds it"
     exit 1
   fi
 fi
 
-# ── 교정 원시연산 (이 파일에만 존재) ────────────────────────────────────────
-# 로그 원칙: 서브커맨드 출력을 원문 그대로 흘리지 않는다. 전부 log()의 태그 안에 담고,
-# **예상된 실패에는 "예상됨"을 명시**한다. 그러지 않으면 폴백 체인이 모순처럼 읽힌다
-# (08-08 시나리오 A: "umount 실패 → unmount 성공 → ls 실패 → 교정 완료").
+# ── Remediation primitives (exist only in this file) ───────────────────────
+# Logging principle: never let subcommand output flow through verbatim. Carry it
+# all inside log()'s tag, and **mark expected failures as "expected"**. Otherwise
+# the fallback chain reads as a contradiction (08-08 scenario A: "umount failed →
+# unmount succeeded → ls failed → remediation complete").
 
 force_umount() {
   local out rc
-  # 1단계: DiskArbitration 경유. diskutil은 스스로 언마운트하지 않고 diskarbitrationd
-  # (시스템 데몬)에 위임하므로 **호출자의 TCC 권한과 무관**하다. autofs 트리거 지점도
-  # automountd와 협조하여 해제된다. 훅 컨텍스트에서는 사실상 항상 이 단계에서 끝난다.
+  # Stage 1: via DiskArbitration. diskutil does not unmount by itself but
+  # delegates to diskarbitrationd (a system daemon), so it is **independent of
+  # the caller's TCC privileges**. The autofs trigger point is also released in
+  # cooperation with automountd. In the hook context this stage effectively
+  # always finishes the job.
   out="$(diskutil unmount force "$SMBG_MP" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
-    log "diskutil unmount force 성공 → state=$(smbg_state)"
+    log "diskutil unmount force succeeded → state=$(smbg_state)"
     return 0
   fi
-  log "diskutil unmount force 실패 → umount -f 폴백: $(smbg_oneline "$out")"
+  log "diskutil unmount force failed → falling back to umount -f: $(smbg_oneline "$out")"
 
-  # 2단계: 커널 직접 호출. diskarbitrationd가 응답하지 않는 상황의 안전망이다.
-  # 데몬 컨텍스트에서는 EPERM으로 실패한다(층 4-b, 08-08 실측). **원인 미확정** —
-  # TCC/FDA는 아니다(FDA 없는 Terminal.app에서 성공). 실행 컨텍스트(launchd system
-  # 도메인 vs 로그인 세션) 또는 대상 마운트의 소유자가 후보다.
-  # 실효가 있는 곳은 터미널에서 실행되는 smbfix 경로다.
-  # v14.2까지는 이 호출이 1단계였고, 훅에서 매번 실패하며 로그를 오염시켰다.
+  # Stage 2: direct kernel call. A safety net for when diskarbitrationd does not
+  # respond. It fails with EPERM in a daemon context (Layer 4b, measured 08-08).
+  # **Cause undetermined** — it is not TCC/FDA (it succeeds from Terminal.app
+  # without FDA). The remaining candidates are the execution context (launchd
+  # system domain vs login session) and the target mount's owner.
+  # Where it does have effect is the smbfix path, which runs from a terminal.
+  # Through v14.2 this call was stage 1, failing on every hook run and polluting
+  # the log.
   out="$(umount -f "$SMBG_MP" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
-    log "umount -f 성공 → state=$(smbg_state)"
+    log "umount -f succeeded → state=$(smbg_state)"
     return 0
   fi
-  log "umount -f 도 실패: $(smbg_oneline "$out") — state=$(smbg_state), 계속 진행"
+  log "umount -f failed too: $(smbg_oneline "$out") — state=$(smbg_state), continuing"
   return 1
 }
 
 trigger_as_owner() {
-  # 디렉터리 open만이 autofs를 트리거한다 (getattrlist/stat64/fsctl은 아님 — 08-07 실측).
-  # ls의 종료 코드·출력은 판정에 쓰지 않는다. TCC가 readdir를 거부(EPERM)해도
-  # open()은 이미 일어났고 automountd는 마운트를 성사시킨다 — 08-08 시나리오 A로 실증.
-  # smbg_in_session(launchctl asuser)으로 사용자 Mach 부트스트랩 컨텍스트를 확보한다.
+  # Only a directory open triggers autofs (not getattrlist/stat64/fsctl —
+  # measured 08-07).
+  # ls's exit code and output are not used for determination. Even when TCC
+  # denies readdir (EPERM), open() has already happened and automountd completes
+  # the mount — demonstrated by scenario A on 08-08.
+  # smbg_in_session (launchctl asuser) secures the user's Mach bootstrap context.
   local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/smbg-trigger.XXXXXX")"
   smbg_in_session /bin/ls "$SMBG_MP" >/dev/null 2>"$tmp" &
   local pid=$! waited=0
@@ -122,52 +136,53 @@ trigger_as_owner() {
     sleep 1; waited=$((waited+1))
     if [ "$waited" -ge "$TRIGGER_TIMEOUT" ]; then
       kill "$pid" 2>/dev/null
-      log "트리거 timeout (${TRIGGER_TIMEOUT}s) — 서버 응답 없음 가능성"
+      log "trigger timeout (${TRIGGER_TIMEOUT}s) — server may not be responding"
       rm -f "$tmp"; return 1
     fi
   done
 
   local err; err="$(smbg_oneline "$(cat "$tmp" 2>/dev/null)")"; rm -f "$tmp"
   case "$err" in
-    "") log "트리거 ls 완료(출력 없음) → state=$(smbg_state)" ;;
+    "") log "trigger ls done (no output) → state=$(smbg_state)" ;;
     *"Operation not permitted"*)
-      # 층 3. FDA가 없는 데몬 컨텍스트에서는 정상 출력이다 — 실패가 아니다.
-      log "트리거 ls EPERM(예상됨 — 층 3, open은 이미 발생) → state=$(smbg_state)" ;;
-    *) log "트리거 ls 출력: $err → state=$(smbg_state)" ;;
+      # Layer 3. In a daemon context without FDA this is normal output — not a failure.
+      log "trigger ls EPERM (expected — Layer 3, open already happened) → state=$(smbg_state)" ;;
+    *) log "trigger ls output: $err → state=$(smbg_state)" ;;
   esac
   return 0
 }
 
 ensure_owner_mount() {
   if ! smbg_session_active; then
-    # asuser는 GUI 세션이 없으면 실패한다. 로그아웃/로그인 화면 상태에서는
-    # 트리거 자체가 불가능하므로, 실패를 조용히 넘기지 않고 명시적으로 남긴다.
-    log "경고: $SMBG_OWNER GUI 세션 없음 — autofs 트리거 불가"
+    # asuser fails when there is no GUI session. At the logout/login window the
+    # trigger is impossible outright, so record the failure explicitly rather
+    # than letting it pass silently.
+    log "warning: no GUI session for $SMBG_OWNER — cannot trigger autofs"
   fi
-  trigger_as_owner || true          # 종료 코드 무시 — 판정은 smbg_state로만
+  trigger_as_owner || true          # ignore the exit code — determination is smbg_state only
   [ "$(smbg_state)" = "HEALTHY" ] && return 0
 
-  # 1회 재시도: 트리거 캐시 플러시 후
-  log "1차 트리거로 HEALTHY 미달(state=$(smbg_state)) — automount -vc 후 재시도"
+  # One retry, after flushing the trigger cache
+  log "first trigger did not reach HEALTHY (state=$(smbg_state)) — retrying after automount -vc"
   local out; out="$(automount -vc 2>&1)"
   [ -n "$out" ] && log "automount -vc: $(smbg_oneline "$out")"
   trigger_as_owner || true
   [ "$(smbg_state)" = "HEALTHY" ]
 }
 
-# ── 모드별 동작 ─────────────────────────────────────────────────────────────
+# ── Per-mode behaviour ─────────────────────────────────────────────────────
 S="$(smbg_state)"
 
 case "$MODE" in
   watch)
     case "$S" in
-      HEALTHY) exit 0 ;;   # 침묵 종료. 발화 빈도가 높으므로 로그도 남기지 않는다.
-      ABSENT)  exit 0 ;;   # watch는 마운트를 만들지 않는다 — ensure의 역할.
+      HEALTHY) exit 0 ;;   # Silent exit. It fires often, so it does not even log.
+      ABSENT)  exit 0 ;;   # watch never creates a mount — that is ensure's job.
       FOREIGN)
-        log "FOREIGN 감지 — 교정 시작"
+        log "FOREIGN detected — starting remediation"
         force_umount
-        if ensure_owner_mount; then log "교정 완료 → HEALTHY"
-        else log "교정 실패 — state=$(smbg_state)"; exit 1; fi
+        if ensure_owner_mount; then log "remediation complete → HEALTHY"
+        else log "remediation failed — state=$(smbg_state)"; exit 1; fi
         ;;
     esac
     ;;
@@ -175,23 +190,23 @@ case "$MODE" in
     case "$S" in
       HEALTHY) log "healthy"; exit 0 ;;
       ABSENT)
-        log "absent — $SMBG_OWNER 자격으로 트리거"
-        if ensure_owner_mount; then log "마운트 완료 → HEALTHY"
-        else log "마운트 실패 — state=$(smbg_state)"; exit 1; fi
+        log "absent — triggering with $SMBG_OWNER credentials"
+        if ensure_owner_mount; then log "mount complete → HEALTHY"
+        else log "mount failed — state=$(smbg_state)"; exit 1; fi
         ;;
       FOREIGN)
-        log "FOREIGN — 교정"
+        log "FOREIGN — remediating"
         force_umount
-        if ensure_owner_mount; then log "교정 완료 → HEALTHY"
-        else log "교정 실패 — state=$(smbg_state)"; exit 1; fi
+        if ensure_owner_mount; then log "remediation complete → HEALTHY"
+        else log "remediation failed — state=$(smbg_state)"; exit 1; fi
         ;;
     esac
     ;;
   remount)
-    log "강제 재마운트 (이전 state=$S)"
+    log "forced remount (previous state=$S)"
     force_umount
-    if ensure_owner_mount; then log "재마운트 완료 → HEALTHY"
-    else log "재마운트 실패 — state=$(smbg_state)"; exit 1; fi
+    if ensure_owner_mount; then log "remount complete → HEALTHY"
+    else log "remount failed — state=$(smbg_state)"; exit 1; fi
     ;;
 esac
 exit 0

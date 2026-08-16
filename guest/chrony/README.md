@@ -1,82 +1,93 @@
-# 게스트 시계 — chrony 참조 설정
+# Guest clock — chrony reference configuration
 
-이 디렉터리의 파일은 **install.sh 가 자동 배치하지 않는다.** 시스템 시계 정책은 배포판마다
-다르고, 잘못 건드리면 손해가 크기 때문이다. 내용을 읽고 직접 반영한다.
+The files in this directory are **not deployed automatically by install.sh.**
+System clock policy varies by distribution and getting it wrong is costly. Read
+them and apply them yourself.
 
-## 역할 분담
+## Role split
 
-| 계층 | 담당 | 언제 |
+| Layer | Owner | When |
 |---|---|---|
-| 상시 권위 | chrony (NTP) | 각성 중 계속 |
-| resume step | `clockfix` (호스트 훅이 ssh 로 호출) | 웨이크 직후 1회 |
-| 하이퍼바이저 시간 동기화 | **끈다** | — |
+| standing authority | chrony (NTP) | continuously while awake |
+| resume step | `clockfix` (called over ssh by the host hook) | once, right after wake |
+| hypervisor time synchronisation | **off** | — |
 
-하이퍼바이저의 게스트 시간 동기화와 게스트 NTP 는 **공존하지 못하는 경우가 있다.**
-Parallels 의 `prltimesync` 는 기동할 때마다 `timedatectl set-ntp 0` 을 실행해 게스트
-NTP 유닛을 disable + stop 시킨다(저널에 `Disabling unit` 으로 실명이 남는다). 이 상태를
-"3계층 방어"로 오인하면 실제로는 단일 계층으로 돌고 있다가 그 하나가 조용히 죽는다 —
-실제로 +76482초(21시간) 스큐가 그렇게 발생했다.
+A hypervisor's guest time synchronisation and guest NTP **sometimes cannot
+coexist.** Parallels' `prltimesync` runs `timedatectl set-ntp 0` every time it
+starts, disabling and stopping the guest NTP unit (it leaves its name in the
+journal as `Disabling unit`). Mistaking that state for "three layers of defence"
+means actually running on a single layer, and then that one dies quietly — a skew
+of +76482 seconds (21 hours) arose exactly that way.
 
-계측 가능한 쪽을 남긴다. chrony 는 `chronyc tracking` 과 저널로 전 이력이 남지만,
-하이퍼바이저 동기화는 로그가 없고 초록불 상태로 스큐를 통과시킨다.
+Keep the instrumentable one. chrony leaves a full history via `chronyc tracking`
+and the journal, whereas hypervisor synchronisation has no log and lets skew
+through while showing a green light.
 
 ```bash
-# Parallels 의 경우 — 호스트에서 1회, .pvm 구성에 영구 저장된다
-prlctl set <VM이름> --time-sync off
-prlctl list -i <VM이름> | grep -i "Time Sync"     # (-) 여야 한다
+# For Parallels — once, from the host; stored permanently in the .pvm configuration
+prlctl set <VM name> --time-sync off
+prlctl list -i <VM name> | grep -i "Time Sync"     # must read (-)
 ```
 
-다른 하이퍼바이저도 동등한 설정이 있다 (VMware `tools.syncTime`,
-VirtualBox `--timesync-set-start` 계열, UTM/QEMU `qemu-guest-agent` 의 시간 동기).
+Other hypervisors have an equivalent setting (VMware `tools.syncTime`, VirtualBox's
+`--timesync-set-start` family, time sync in UTM/QEMU's `qemu-guest-agent`).
 
-> **더 강한 처방은 게스트 통합 도구를 아예 설치하지 않는 것이다.** 위 설정은 한 줄이라
-> 도구의 자동 업데이트·재설치·구성 복원으로 되돌아갈 수 있고, 되돌아가도 로그가 없어
-> 다음 스큐까지 드러나지 않는다. 헤드리스 개발 게스트에서는 도구가 주는 나머지 기능
-> (클립보드·디스플레이·공유 폴더·호스트 hosts 자동 등록)이 모두 불필요하거나 이 설계가
-> 쓰지 않는 것들이다. 근거와 제거 절차는
-> [failure-model.md](../../docs/failure-model.md) 층 1 의 '더 강한 처방' 참조.
+> **The stronger remedy is not installing the guest integration tools at all.** The
+> setting above is one line, so a tool's auto-update, reinstall or configuration
+> restore can revert it, and a reverted state leaves no log, so it stays hidden
+> until the next skew. On a headless development guest everything else the tools
+> provide (clipboard, display, shared folders, automatic host hosts registration)
+> is either unnecessary or something this design does not use. For the rationale
+> and the removal procedure see 'The stronger remedy' under Layer 1 in
+> [failure-model.md](../../docs/failure-model.md).
 
-## 파일
+## Files
 
 ### `makestep.conf`
 
-`/etc/chrony/chrony.conf` 말미 또는 `/etc/chrony/conf.d/` 에 넣는다.
+Put it at the end of `/etc/chrony/chrony.conf` or into `/etc/chrony/conf.d/`.
 
-횟수 제한 없는 step 을 허용한다. resume 후 `clockfix` 가 실패하더라도 chrony 가 스스로
-큰 오차를 복구해야 하기 때문이다 — 기본 정책은 기동 직후 몇 회만 step 을 허용하고
-이후에는 slew 로만 좁히므로, 수천 초 오차를 사실상 복구하지 못한다.
+Allows stepping without a count limit, because chrony has to recover a large error
+on its own even when `clockfix` fails after resume — the default policy allows a
+step only a few times right after startup and closes the gap by slewing thereafter,
+which effectively cannot recover an error of thousands of seconds.
 
 ### `local-pool.conf.example`
 
-근거리 NTP 소스. 배포판 기본 pool 이 지리적으로 멀면 RTT 와 도달성이 나빠진다
-(영국 단일 소스에 의존하던 구성에서 1시간 11분 offline 방치를 실측했다).
+A nearby NTP source. When the distribution's default pool is geographically distant,
+RTT and reachability suffer (with a configuration depending on a single source in
+the UK, being left offline for 1 hour 11 minutes was measured).
 
-`maxpoll 6`(64초)은 **clockfix 가 실패했을 때 폴백의 최악 복구 시간 상한**이다.
-기본값 1024초로는 웨이크 후 17분간 시계가 틀린 채로 남을 수 있다.
+`maxpoll 6` (64 seconds) is **the worst-case recovery time of the fallback when
+clockfix has failed**. With the default of 1024 seconds the clock can stay wrong for
+17 minutes after a wake.
 
-## 오염된 drift 정리
+## Clearing a contaminated drift file
 
-`chronyd` 는 종료할 때 drift 파일을 **재작성한다.** 그래서 `stop → rm → start` 로 끝내면
-오염된 값이 되살아난다 — 실제로 `rm` 한 뒤 재부팅했더니 부팅 인스턴스가 이전 값
-(-27905 ppm)을 그대로 로드한 사례가 있다.
+`chronyd` **rewrites** the drift file when it exits. So finishing with
+`stop -> rm -> start` brings the contaminated value back — there was a case where,
+after an `rm` and a reboot, the booting instance loaded the previous value
+(-27905 ppm) unchanged.
 
-**정리는 수렴 확인까지가 한 단위다.** 수렴 전에 재부팅하면 오염이 한 세대 더 전파된다.
+**The cleanup is one unit of work up to and including confirming convergence.** A
+reboot before convergence propagates the contamination one more generation.
 
 ```bash
 sudo systemctl stop chrony
 sudo rm -f /var/lib/chrony/chrony.drift
 sudo systemctl start chrony
-sleep 20 && chronyc tracking      # Frequency 가 한 자리 ppm 으로 수렴할 때까지 관찰
+sleep 20 && chronyc tracking      # watch until Frequency converges to single-digit ppm
 ```
 
-## 정상 지표
+## Healthy indicators
 
 ```bash
 chronyc tracking
-#   System time : ms 대
-#   Frequency   : 한 자리 ppm
-journalctl -u chrony | grep -i stepped    # 각성 중 0건이어야 한다
+#   System time : milliseconds
+#   Frequency   : single-digit ppm
+journalctl -u chrony | grep -i stepped    # must be 0 occurrences while awake
 ```
 
-각성 중에 `stepped` 가 찍히면 `clockfix` 가 밀린 것이다 — resume step 은 chrony 로그에
-남지 않는다(chronyd 는 외부 step 을 감지해 이력만 리셋한다).
+A `stepped` entry while awake means `clockfix` was late — a resume step does not
+appear in chrony's log (chronyd detects an external step and merely resets its
+history).
