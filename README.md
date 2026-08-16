@@ -19,12 +19,15 @@ SMB 마운트는 "끊어지거나 붙어 있거나" 둘 중 하나가 아니다.
 - **게스트 시계 정지** — 호스트가 자면 게스트 시계도 멈춘다. 깨어난 뒤 수천 초 어긋난
   시계로 파일을 쓰면 mtime 이 미래가 되고, mtime 기반 빌드 도구(cargo 등)가 소스 변경을
   **침묵 무시**한다.
+- **서버 로컬 쓰기는 클라이언트 캐시에 비가시적** — 게스트가 쓴 파일을 맥이 캐시로
+  읽으면, 단발 읽기·에디터 재읽기·부분 읽기는 **무기한** 옛 내용을 반환한다. 에러가
+  없어 로그로도 안 보인다. 처방은 마운트 옵션 `nodatacache` (비용 실측 0).
 - **부수 파일 차단이 주 기능을 죽인다** — 서버에서 `.DS_Store` 쓰기를 막으면 Finder
   CopyEngine 이 복사 작업 **전체**를 실패시킨다(오류 `-8062`). 대화상자는 실패한 경로를
   알려주지 않아 권한·용량 문제로 오진하기 쉽다.
 
 전부 "로그를 안 보면 모르는" 종류다. 자세한 인과와 실측 근거는
-[docs/failure-model.md](docs/failure-model.md) 를 볼 것 — 7개 층으로 정리했다.
+[docs/failure-model.md](docs/failure-model.md) 를 볼 것 — 8개 층으로 정리했다.
 
 ## 무엇을 하는가
 
@@ -92,7 +95,7 @@ sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'dat
 | [docs/architecture.md](docs/architecture.md) | 구성 전문, 역할 분담, 설계 계약 |
 | [docs/install.md](docs/install.md) | 설치·검증 절차, 수동 배치 대조표 |
 | [docs/operations.md](docs/operations.md) | 관찰 항목과 진단 도구 |
-| [docs/decisions.md](docs/decisions.md) | 결정 기록과 설계 원칙 28개 |
+| [docs/decisions.md](docs/decisions.md) | 결정 기록과 설계 원칙 29개 |
 | [docs/open-questions.md](docs/open-questions.md) | 미결 과제와 잠복 위험 |
 | [docs/history/](docs/history/) | 개발 이력 원장 (실측 로그·기각된 가설 포함) |
 
