@@ -116,6 +116,13 @@ changing its meaning, and moving a deployment path, are major changes.
 
 ### Fixed
 
+- **Guest transfer no longer floods the output with tar warnings.** `install.sh`
+  passed `--no-xattrs` to suppress them, but BSD file flags come from `chflags`
+  rather than from extended attributes, so they survived and the guest's GNU tar
+  still emitted one `Ignoring unknown extended header keyword 'SCHILY.fflags'` per
+  entry — the exact noise that option existed to prevent, and the kind that buries a
+  real error. Added `--no-fflags`.
+
 - **Corrected the interpretation of the Layer 7 bistability: what differs is not
   notify delivery but whether the client data cache is used at all** — while
   verifying the nodatacache change, a default-options mount was also measured
