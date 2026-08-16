@@ -13,6 +13,13 @@
 
 - Samba, systemd
 - 워크스페이스 경로가 존재할 것
+- **고정 IP 로 둘 것**, 그리고 호스트에서 그 주소로 게스트 이름이 해석될 것(호스트
+  `/etc/hosts` 의 정적 항목 권장). 마운트 URL 과 ssh 별칭이 모두 이 해석에 의존하고,
+  웨이크 훅의 시계 교정이 그 ssh 를 탄다
+- **하이퍼바이저 게스트 통합 도구(Parallels Tools 등)를 설치하지 말 것.** 시간 동기화가
+  게스트 NTP 와 배타적이고([failure-model.md](failure-model.md) 층 1), 헤드리스 구성에서
+  나머지 기능은 불필요하거나 이 설계가 쓰지 않는다. 이미 설치되어 있으면 제거를 권한다
+  — 근거·절차는 층 1 의 '더 강한 처방'
 - **공유 루트를 워크스페이스 상위에 둘 것** (권장 — [failure-model.md](failure-model.md)
   층 6). `SMBG_EXPORT_ROOT` 아래에 워크스페이스가 보이도록 bind mount 를 걸어 둔다:
 
@@ -148,6 +155,20 @@ sudo systemctl enable --now mac-cruft-cleanup.timer
 ---
 
 ## 검증
+
+### 한 번에 보기 — `tools/doctor.sh`
+
+배치·권한·로드 상태·autofs 를 한 번에 훑는 읽기 전용 점검 도구가 있다. 아래 개별 절차의
+정적 부분(0·1·3의 일부)을 대체하며, **macOS 메이저 업그레이드 직후에는 이것부터 돌린다.**
+
+```bash
+sudo ./tools/doctor.sh          # 0 정상 / 1 이상 / 2 판정 불완전(root 필요 항목 스킵)
+```
+
+아무것도 고치지 않고 항목별 처방만 안내한다(원칙 21). **다만 이것으로 대체되지 않는 것이
+둘 있다** — autofs 설정의 *반영* 여부(`automount -vc`)와 마운트 훅이 실제로 걸렸는지는
+읽기 전용으로 판정할 수 없다. 아래 2·4·6 은 여전히 손으로 확인한다. 자세한 판정 기준은
+[tools/README.md](../tools/README.md).
 
 ### 0. 최우선 — root 컨텍스트의 게스트 ssh
 

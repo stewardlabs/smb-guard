@@ -29,6 +29,13 @@ prlctl list -i <VM이름> | grep -i "Time Sync"     # (-) 여야 한다
 다른 하이퍼바이저도 동등한 설정이 있다 (VMware `tools.syncTime`,
 VirtualBox `--timesync-set-start` 계열, UTM/QEMU `qemu-guest-agent` 의 시간 동기).
 
+> **더 강한 처방은 게스트 통합 도구를 아예 설치하지 않는 것이다.** 위 설정은 한 줄이라
+> 도구의 자동 업데이트·재설치·구성 복원으로 되돌아갈 수 있고, 되돌아가도 로그가 없어
+> 다음 스큐까지 드러나지 않는다. 헤드리스 개발 게스트에서는 도구가 주는 나머지 기능
+> (클립보드·디스플레이·공유 폴더·호스트 hosts 자동 등록)이 모두 불필요하거나 이 설계가
+> 쓰지 않는 것들이다. 근거와 제거 절차는
+> [failure-model.md](../../docs/failure-model.md) 층 1 의 '더 강한 처방' 참조.
+
 ## 파일
 
 ### `makestep.conf`

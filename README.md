@@ -56,6 +56,10 @@ SMB 마운트는 "끊어지거나 붙어 있거나" 둘 중 하나가 아니다.
   — brew 서비스로 등록하지 말 것, 이 레포가 자체 LaunchDaemon 으로 배치한다)
 - **게스트**: Linux + Samba, systemd, 호스트에서 키 기반 ssh 로그인
 - 워크스페이스가 호스트에 **autofs 직접 맵**으로 마운트되어 있을 것
+- 게스트가 **고정 IP** 이고 호스트에서 그 주소로 이름이 해석될 것 (정적 `/etc/hosts` 권장)
+
+가상 게스트라면 **하이퍼바이저 게스트 통합 도구를 설치하지 않는다.** 시간 동기화가 게스트
+NTP 를 강제로 끄기 때문이며(층 1), 헤드리스 구성에서 나머지 기능은 쓰이지 않는다.
 
 물리 Linux 서버에도 쓸 수 있다. 그 경우 `clockfix` 와 chrony 설정은 불필요하다 —
 시계가 멈추는 것은 가상 게스트 고유의 문제다.
@@ -81,6 +85,14 @@ $EDITOR smb-guard.conf          # 계정·마운트 지점·게스트 별칭·�
 sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'date +%s'
 ```
 
+배치·권한·로드 상태·autofs 를 한 번에 훑으려면 읽기 전용 점검 도구를 쓴다. **OS 메이저
+업그레이드 직후에도 이것부터 돌린다** — 업그레이드는 autofs 설정을 되돌리거나 백그라운드
+항목 승인을 리셋해, 파일은 그대로인데 잡이 죽어 있는 상태를 만든다.
+
+```bash
+sudo ./tools/doctor.sh
+```
+
 설치 스크립트를 쓰지 않고 손으로 배치해도 된다 — [docs/install.md](docs/install.md) 에
 파일·목적지·소유자·권한 대조표가 있다. 다만 **권한을 정확히 맞춰야 한다.** 이 체계의
 지배적 실패 모드가 "권한이 틀리면 조용히 무시된다"이다: `newsyslog` 설정이 `root:wheel
@@ -91,7 +103,7 @@ sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <게스트> 'dat
 
 | 문서 | 내용 |
 |---|---|
-| [docs/failure-model.md](docs/failure-model.md) | 7층 고장 모델과 에러 코드 지도 — **먼저 읽을 것** |
+| [docs/failure-model.md](docs/failure-model.md) | 8층 고장 모델과 에러 코드 지도 — **먼저 읽을 것** |
 | [docs/architecture.md](docs/architecture.md) | 구성 전문, 역할 분담, 설계 계약 |
 | [docs/install.md](docs/install.md) | 설치·검증 절차, 수동 배치 대조표 |
 | [docs/operations.md](docs/operations.md) | 관찰 항목과 진단 도구 |
