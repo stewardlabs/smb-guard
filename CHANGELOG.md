@@ -73,6 +73,22 @@ changing its meaning, and moving a deployment path, are major changes.
 
 ### Changed
 
+- **`tools/probe-layer4b.sh` and `tools/cleanup.sh` no longer hardcode the account
+  and paths.** Both predated configuration externalisation and still carried a
+  personal account name and workspace path in variables at the top, so anyone else
+  running them would have targeted the wrong account and path.
+  `probe-layer4b.sh` now resolves the configuration exactly as `doctor.sh` does
+  (deployed copy, then the repo's, with `--config` to override) and derives the
+  LaunchDaemon label from `SMBG_LABEL_PREFIX` using the same assembly rule as
+  `host/install.sh`. `cleanup.sh` takes `--owner <account>`, falling back to
+  `SMBG_OWNER` from the configuration; the configuration is deliberately **not**
+  required there, because the users who need that tool are migrating from a v13
+  deployment and predate configuration externalisation entirely.
+  Also removed the `|| echo 501` fallback on the UID lookup in `cleanup.sh` — a
+  leftover of the pattern dropped in 1.0.0 under 'Removed the account lookup
+  fallback'. That UID selects the launchd domain to `bootout`, so a guessed value
+  would target an unrelated user's domain.
+
 - **The project language is now English** — code comments, user-facing output (log
   lines, errors, help text), documentation, commit messages and pull requests. This
   repository is published so that people running the same setup do not have to

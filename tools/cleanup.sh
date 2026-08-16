@@ -10,22 +10,69 @@
 #   run at the same time and intervene twice.
 #
 # Dry-run by default. Actual deletion:  sudo ./cleanup.sh --apply
+#
+# usage: sudo ./cleanup.sh [--apply] [--purge-sudoers] [--owner <account>] [--config <path>]
+#
+# The owner account is resolved as: --owner > SMBG_OWNER in the configuration file.
+# Unlike the other tools, the configuration file is not required here. The people who
+# need this tool are the ones migrating from a v13 deployment, and configuration
+# externalisation only arrived in v1.0.0 — requiring it would lock out exactly the
+# users this exists for. Hence --owner.
 set -eu
 
 [ "$(id -u)" -eq 0 ] || { echo "run as sudo ./cleanup.sh [--apply]" >&2; exit 1; }
 
+usage() {
+    echo "usage: sudo ./cleanup.sh [--apply] [--purge-sudoers] [--owner <account>] [--config <path>]" >&2
+    exit 2
+}
+
 APPLY=0
 PURGE_SUDOERS=0
-for a in "$@"; do
-    case "$a" in
-        --apply)          APPLY=1 ;;
-        --purge-sudoers)  PURGE_SUDOERS=1 ;;
-        *) echo "usage: sudo ./cleanup.sh [--apply] [--purge-sudoers]" >&2; exit 2 ;;
+OWNER=""
+CONF=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --apply)          APPLY=1; shift ;;
+        --purge-sudoers)  PURGE_SUDOERS=1; shift ;;
+        --owner)          [ $# -ge 2 ] || usage; OWNER="$2"; shift 2 ;;
+        --config)         [ $# -ge 2 ] || usage; CONF="$2"; shift 2 ;;
+        *) usage ;;
     esac
 done
 [ "$APPLY" -eq 0 ] && echo "*** DRY-RUN — pass --apply to actually delete ***" && echo
 
-OWNER="sanha"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+
+if [ -z "$OWNER" ]; then
+    if [ -z "$CONF" ]; then
+        for c in /usr/local/etc/smb-guard.conf "$ROOT/smb-guard.conf"; do
+            [ -r "$c" ] && { CONF="$c"; break; }
+        done
+    fi
+    if [ -n "$CONF" ] && [ -r "$CONF" ]; then
+        # shellcheck source=/dev/null
+        . "$CONF"
+        OWNER="${SMBG_OWNER:-}"
+    fi
+fi
+if [ -z "$OWNER" ]; then
+    echo "!! the owner account could not be determined." >&2
+    echo "   Pass it explicitly:  sudo ./cleanup.sh --owner <account>" >&2
+    echo "   (or point --config at a smb-guard.conf that sets SMBG_OWNER)" >&2
+    exit 78   # EX_CONFIG
+fi
+
+# No fallback on a failed lookup. A wrong UID would target an unrelated user's
+# launchd domain in the bootout below — the same reason the account lookup fallback
+# was removed in v1.0.0.
+OWNER_UID="$(id -u "$OWNER" 2>/dev/null || true)"
+if [ -z "$OWNER_UID" ]; then
+    echo "!! account '$OWNER' does not exist." >&2
+    exit 78
+fi
+
 HOME_DIR="$(dscl . -read "/Users/$OWNER" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)"
 : "${HOME_DIR:=/Users/$OWNER}"
 
@@ -53,7 +100,6 @@ act() {   # act <path> <description>
 }
 
 echo "== 1. leftovers of the brew sleepwatcher service =="
-OWNER_UID="$(id -u "$OWNER" 2>/dev/null || echo 501)"
 if [ "$APPLY" -eq 1 ]; then
     launchctl bootout "gui/$OWNER_UID/homebrew.mxcl.sleepwatcher" 2>/dev/null || true
     sudo -u "$OWNER" -H brew services stop sleepwatcher 2>/dev/null || true
