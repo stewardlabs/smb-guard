@@ -102,9 +102,11 @@ The hazards of a reproduction experiment are still there (stopping the watch,
 unmounting artificially), so use it only when investigating a recurrence. It
 restores the daemon and the mount via an EXIT trap.
 
-> This script predates the externalisation of the configuration, so paths and the
-> account are hardcoded as variables at the top. Set `MP`, `OWNER` and `LABEL` to
-> your own environment before use.
+It reads `smb-guard.conf` the same way `doctor.sh` does — the deployed copy first,
+then the repo's, with `--config <path>` to override. Since it stops a deployed
+launchd job and calls the deployed `smb-guard`, its target is always an
+already-deployed environment, so a missing configuration is a hard failure rather
+than something to guess around.
 
 ## `cleanup.sh`
 
@@ -126,6 +128,18 @@ The design of **auditing sudoers without remediating it** came from here as well
 "Fixing" a file that has been ignored because its permissions were wrong means
 newly opening a privilege that was never granted (Principle 21).
 
-> This script also has the account and paths hardcoded. Check `OWNER` before
-> running it. It is dry-run by default; `--apply` is required to actually delete,
-> and it backs things up before deletion.
+```bash
+sudo ./cleanup.sh --owner <account>              # dry-run
+sudo ./cleanup.sh --owner <account> --apply      # actually delete (backs up first)
+```
+
+The owner account comes from `--owner`, or from `SMBG_OWNER` in `smb-guard.conf`
+when that is available. **Unlike the other tools, the configuration file is not
+required here** — the people who need this tool are migrating from a v13
+deployment, and configuration externalisation only arrived in v1.0.0, so requiring
+it would lock out exactly the users it exists for.
+
+It is dry-run by default; `--apply` is required to actually delete, and it backs
+things up before deletion. A failed account lookup is a hard failure with no
+fallback UID: the account's UID selects the launchd domain to `bootout`, and a
+guessed one would target an unrelated user.

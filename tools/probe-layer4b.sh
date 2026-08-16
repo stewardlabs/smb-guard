@@ -1,5 +1,7 @@
 #!/bin/bash
-# probe-layer4b.sh v2 — one-off diagnostic to determine the cause of Layer 4b.  sudo ./probe-layer4b.sh
+# probe-layer4b.sh v2 — one-off diagnostic to determine the cause of Layer 4b.
+#
+# usage: sudo ./probe-layer4b.sh [--config <path>]
 #
 # Background: `umount -f` returned EPERM only in a daemon context (smb-guard
 # watch) — 08-08 12:19, once.
@@ -17,10 +19,42 @@
 #   - An "immediate umount" round was added to test hypothesis (c).
 set -u
 
-PLIST=/Library/LaunchDaemons/io.stewardlabs.smb-guard.plist
-LABEL=system/io.stewardlabs.smb-guard
-MP=/opt/stewardlabs
-OWNER=sanha
+# This tool stops a deployed launchd job and calls the deployed
+# /usr/local/sbin/smb-guard, so its target is always an already-deployed
+# environment. That is why it prefers the deployed configuration and fails outright
+# when there is none — the same resolution order as doctor.sh.
+CONF=""
+[ "${1:-}" = "--config" ] && { CONF="${2:?--config requires a path}"; shift 2; }
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+
+DEPLOY_CONF="/usr/local/etc/smb-guard.conf"
+if [ -z "$CONF" ]; then
+    if   [ -r "$DEPLOY_CONF" ];         then CONF="$DEPLOY_CONF"
+    elif [ -r "$ROOT/smb-guard.conf" ]; then CONF="$ROOT/smb-guard.conf"
+    else
+        echo "configuration not found: $DEPLOY_CONF, $ROOT/smb-guard.conf" >&2
+        exit 78   # EX_CONFIG
+    fi
+fi
+[ -r "$CONF" ] || { echo "configuration not readable: $CONF" >&2; exit 78; }
+# shellcheck source=/dev/null
+. "$CONF"
+: "${SMBG_MP:?$CONF: SMBG_MP is not set}"
+: "${SMBG_OWNER:?$CONF: SMBG_OWNER is not set}"
+: "${SMBG_LABEL_PREFIX:=io.stewardlabs}"
+
+# Assembled by the same rule as host/install.sh and doctor.sh. Three separate
+# definitions would drift silently the moment the label prefix changes.
+GUARD_LABEL="$SMBG_LABEL_PREFIX.smb-guard"
+PLIST="/Library/LaunchDaemons/$GUARD_LABEL.plist"
+LABEL="system/$GUARD_LABEL"
+MP="$SMBG_MP"
+OWNER="$SMBG_OWNER"
+
+# Not externalised: this is an experiment tuning value (how many times to retry
+# against the race), not an environment-specific one.
 RETRIES=5
 
 [ "$(id -u)" -eq 0 ] || { echo "run as sudo ./probe-layer4b.sh" >&2; exit 1; }
