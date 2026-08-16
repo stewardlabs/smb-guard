@@ -20,6 +20,7 @@
 | 각성 중 step | `journalctl -u chrony \| grep -i stepped` | **0건.** 찍히면 resume step 이 밀린 것이다 |
 | 호스트 시계 건전성 | 월 1회 `sntp time.apple.com` | 수십 ms. 초 단위로 틀어져 있으면 게스트를 틀리게 맞추게 된다 |
 | SMB 세션 누수 | 주 1~2회 `sudo smbstatus -b` (게스트) | 세션 수가 단조 증가하지 않는다 |
+| 구성 생존 | **OS 메이저 업그레이드 직후** `sudo ./tools/doctor.sh` | 종료 코드 0. 업그레이드는 autofs 3종을 기본값으로 되돌리거나 BTM 승인을 리셋해 잡을 "파일은 있는데 로드 안 됨"으로 만들 수 있다 |
 
 ### 이벤트 소스를 봐야 하는 경우
 
@@ -46,6 +47,7 @@ log show --last 24h \
 ### 호스트
 
 ```bash
+sudo ./tools/doctor.sh     # 구성 생존 점검 — 읽기 전용, 한 번에 훑는다
 smb-guard --state          # 부작용 없는 상태 조회 (root 불필요)
 mount | grep <마운트지점>   # 소유자 판정은 `mounted by` 필드로만
 tail -50 /var/log/smb/smb-guard.log
