@@ -1,146 +1,164 @@
-# 아키텍처
+# Architecture
 
-각 구성요소는 **자기만 알 수 있는 정보로 자기만 할 수 있는 일**을 한다. 전 구성요소가
-이벤트 구동 또는 상시 데몬이며 주기 폴링이 없다 — 단, 게스트의 잔재 정리만 타이머다
-(회수 대상이 이벤트를 발생시키지 않으므로).
+Each component does **only what it alone can do, with information only it has.**
+Every component is event-driven or a resident daemon; there is no periodic polling —
+except the guest's cruft cleanup, which is a timer (because what it reclaims
+generates no events).
 
-## 역할 분담
+## Role split
 
-| 구성요소 | 트리거 | 담당 | 하지 않는 것 |
+| Component | Trigger | Responsibility | Does not do |
 |---|---|---|---|
-| `smb-guard` (watch) | 마운트 이벤트 | 소유권 이상 즉시 교정 | 마운트 생성, 시계 |
-| `smb-guard-sleep` | 수면 직전 | 수면 시각 기록 + 상태 1줄 | 언마운트 |
-| `smb-guard-wakeup` | 웨이크 | 게이트 → 네트워크 대기 → 시계 → 마운트 보장 → 생존성 | 소유권 판정·교정 (→ guard) |
-| `smbfix` | 사람 | 시계 교정 + 강제 재마운트 + 진단 | 자체 마운트 로직 (→ guard) |
-| 게스트 NTP | 상시 | 각성 중 시계 보정 | — |
-| `clockfix` | wakeup / smbfix | resume 직후 즉시 step | — |
-| `mac-cruft-cleanup` | 타이머 (15분) | 잔재 회수 | 차단 |
+| `smb-guard` (watch) | mount event | immediate remediation of ownership faults | creating mounts, the clock |
+| `smb-guard-sleep` | just before sleep | records the sleep time plus one state line | unmounting |
+| `smb-guard-wakeup` | wake | gate -> network wait -> clock -> mount assurance -> liveness | ownership determination and remediation (-> guard) |
+| `smbfix` | a human | clock correction + forced remount + diagnosis | its own mount logic (-> guard) |
+| guest NTP | continuous | clock correction while awake | — |
+| `clockfix` | wakeup / smbfix | immediate step right after resume | — |
+| `mac-cruft-cleanup` | timer (15 min) | cruft reclamation | blocking |
 
-### 수면 훅이 언마운트하지 않는 이유
+### Why the sleep hook does not unmount
 
-macOS 가 `-s` 훅에 주는 시간은 짧고 보장되지 않는다. 여기서 네트워크 I/O 나 `umount` 를
-시도하면 완료 전에 수면이 진행될 수 있고, **중단된 언마운트는 더 나쁜 중간 상태를 남긴다.**
-게다가 언마운트는 하이재킹 창을 다시 여는 일이다.
+The time macOS grants a `-s` hook is short and not guaranteed. Attempting network
+I/O or an `umount` there can be cut off by sleep proceeding, and **an interrupted
+unmount leaves an even worse intermediate state.** On top of that, unmounting
+reopens the hijacking window.
 
-이 체계의 복구 전략은 **웨이크 측 수선**이다. 수면 측은 웨이크 측이 판단에 쓸 사실
-(직전 수면 시각, 그때의 상태)만 남긴다.
+This system's recovery strategy is **repair on the wake side.** The sleep side
+records only the facts the wake side needs for its decision (the time of the last
+sleep, and the state at that moment).
 
-## `smb-guard` 의 계약
+## The `smb-guard` contract
 
-네 가지 모드를 갖는다.
+It has four modes.
 
-| 모드 | 호출자 | 동작 |
+| Mode | Caller | Behaviour |
 |---|---|---|
-| (기본) `watch` | LaunchDaemon (`StartOnMount`) | 이상 상태만 교정. **마운트를 만들지 않는다** |
-| `--ensure` | `smb-guard-wakeup` | 부재 시 생성 포함 |
-| `--remount` | `smbfix` | 상태 무관 강제 재마운트 |
-| `--state` | 사람·스크립트 | 판정만 출력. 부작용 없음, root 불필요 |
+| (default) `watch` | LaunchDaemon (`StartOnMount`) | remediates faults only. **Never creates a mount** |
+| `--ensure` | `smb-guard-wakeup` | includes creation when absent |
+| `--remount` | `smbfix` | forced remount regardless of state |
+| `--state` | humans and scripts | prints the determination only. No side effects, no root |
 
-**계약:**
+**The contract:**
 
-- 판정은 mount 테이블만 (`mounted by <소유자>` 유무). 경로 접근을 판정에 쓰지 않는다.
-- 트리거는 소유자 자격의 디렉터리 `open`(=`ls`) 하나뿐. **`ls` 의 종료 코드는 무시하고**
-  mount 테이블 재조회로 성공을 판정한다.
-- watch 의 교정이 낳는 새 마운트 이벤트는 자기 자신을 재발화시키지만, 재발화 인스턴스가
-  정상 상태를 보고 침묵 종료하므로 루프가 종결된다. `mkdir` 잠금 + `ThrottleInterval 5s`
-  이중 방어.
-- **`--ensure`/`--remount` 는 잠금 경합 시 대기하며, 끝내 못 얻으면 실패를 반환한다.**
-  호출자가 결과를 신뢰하는 경로이므로 침묵 성공은 금지다. 반면 `watch` 는 잠금을 못 얻으면
-  즉시 물러난다 — 이미 다른 인스턴스가 처리 중이라는 뜻이므로 그것이 올바른 동작이다.
-- 잠금에는 **만료가 있다.** 인스턴스가 `SIGKILL` 로 죽으면 EXIT trap 이 돌지 않아 잠금이
-  영구히 남고, 그때부터 전체가 침묵한다 — 로그에도 아무것도 남지 않는 무증상 고장이다.
-  임계(120초)를 넘긴 잠금은 잔재로 간주해 제거하고, 제거 사실을 로그에 남긴다.
-- GUI 세션 부재 시 트리거가 불가능함을 로그에 명시한다. `launchctl asuser` 는 로그아웃
-  상태에서 실패하므로, 조용히 넘기면 원인 불명의 교정 실패로 보인다.
+- Determination reads the mount table only (presence of `mounted by <owner>`). Path
+  access is never used for it.
+- The only trigger is one directory `open` (i.e. `ls`) with the owner's
+  credentials. **The exit code of `ls` is ignored**; success is determined by
+  re-reading the mount table.
+- The new mount event produced by watch's remediation re-fires the script itself,
+  but the re-fired instance sees a healthy state and exits silently, so the loop
+  terminates. A `mkdir` lock plus `ThrottleInterval 5s` are the two lines of
+  defence.
+- **`--ensure` and `--remount` wait on lock contention and return failure if they
+  never get it.** These are the paths whose result the caller trusts, so silent
+  success is forbidden. `watch`, by contrast, backs off immediately when it cannot
+  take the lock — that means another instance is already handling it, which makes
+  backing off the correct behaviour.
+- **The lock has an expiry.** When an instance dies from `SIGKILL` the EXIT trap
+  never runs, the lock survives forever, and from then on everything goes silent —
+  an asymptomatic failure that leaves nothing in the log either. A lock past the
+  threshold (120 seconds) is treated as cruft, removed, and its removal is logged.
+- The impossibility of triggering without a GUI session is stated explicitly in the
+  log. `launchctl asuser` fails at the logout state, and passing that over silently
+  would make it look like a remediation failure of unknown cause.
 
-### 언마운트 폴백 체인
+### The unmount fallback chain
 
 ```
-1단계  diskutil unmount force   → DiskArbitration 에 위임. 호출자 컨텍스트에 덜 의존한다
-2단계  umount -f                → 커널 직접 호출. diskarbitrationd 장애 시의 안전망
+stage 1  diskutil unmount force   -> delegates to DiskArbitration. Less dependent on the caller's context
+stage 2  umount -f                -> direct kernel call. The safety net for a diskarbitrationd failure
 ```
 
-훅 컨텍스트에서는 사실상 항상 1단계에서 끝난다. 2단계가 로그에 나타나면 **1단계가
-실패했다는 신호**이며 관측된 적 없는 상황이다 — 조사 대상.
+In the hook context stage 1 effectively always finishes the job. Stage 2 appearing
+in the log is **the signal that stage 1 failed**, a situation never yet observed —
+investigate it.
 
-## 권한 도메인
+## Privilege domains
 
-전 구성요소가 launchd **system 도메인**(root)에서 돈다. 그런데 네 지점은 사용자 자격이
-필요하므로 명시적으로 전환한다.
+Every component runs in the launchd **system domain** (root). Four points need user
+credentials, and switch to them explicitly.
 
-| 호출 | 사용자 자격이 필요한 이유 | 전환 수단 |
+| Call | Why user credentials are needed | Means of switching |
 |---|---|---|
-| `ssh <게스트>` | `~/.ssh/config` 별칭과 키가 소유자 소유 | `sudo -u <소유자> -H` |
-| 사용자 훅 `open` | GUI 세션(Aqua) 필요 | `launchctl asuser` |
-| 트리거·생존성 `ls` | 소유자 관점의 접근성이 측정 대상 | `launchctl asuser` |
-| 수동 도구의 `mount_smbfs` 프로브 | **로그인 키체인의 SMB 자격증명** | `launchctl asuser` |
+| `ssh <guest>` | the alias and key in `~/.ssh/config` belong to the owner | `sudo -u <owner> -H` |
+| user hook `open` | needs a GUI session (Aqua) | `launchctl asuser` |
+| trigger and liveness `ls` | accessibility from the owner's viewpoint is what is being measured | `launchctl asuser` |
+| the manual tool's `mount_smbfs` probe | **SMB credentials in the login keychain** | `launchctl asuser` |
 
-마지막 항목이 특히 중요하다. root 컨텍스트에서는 로그인 키체인이 잠겨 있어 조회되지
-않으므로, **실제 원인과 무관한 인증 실패로 오진**하게 된다.
+The last one matters most. In a root context the login keychain is locked and
+cannot be read, which produces **a misdiagnosis of authentication failure unrelated
+to the actual cause.**
 
-래퍼는 양쪽 도메인에서 성립하도록 작성했다 — 이미 소유자면 `sudo` 없이 직접 실행하고,
-root 면 직접·아니면 `sudo -n` 으로 호출한다. **user 도메인(LaunchAgent)으로 되돌려도
-코드 수정 없이 동작한다.**
+The wrappers are written to hold in both domains — if already the owner they run
+directly without `sudo`; as root they run directly, otherwise via `sudo -n`.
+**Moving back to the user domain (a LaunchAgent) would work without code changes.**
 
-> **설치 후 최우선 검증**: `sudo -u <소유자> -H ssh` 는 `SSH_AUTH_SOCK` 을 상속하지
-> 않는다. 키에 패스프레이즈가 걸려 있고 ssh-agent 에 의존한다면 `BatchMode=yes` 가
-> 실패하고 **시계 교정이 통째로 무력화된다.**
+> **Top-priority check after installation**: `sudo -u <owner> -H ssh` does not
+> inherit `SSH_AUTH_SOCK`. If the key has a passphrase and relies on ssh-agent,
+> `BatchMode=yes` fails and **clock correction is disabled entirely.**
 >
-> 실패 시 선택지: (1) 패스프레이즈 없는 전용 키를 소유자의 `~/.ssh/config` 에 지정,
-> (2) sleepwatcher 를 user 도메인 LaunchAgent 로 유지.
+> If it fails, the options are: (1) point the owner's `~/.ssh/config` at a
+> dedicated key without a passphrase, or (2) keep sleepwatcher as a user-domain
+> LaunchAgent.
 
-## 로그
+## Logging
 
-`$SMBG_LOGDIR/smb-guard.log` 하나로 통합하고 태그로 구분한다.
+Unified into a single `$SMBG_LOGDIR/smb-guard.log`, distinguished by tags.
 
 ```
 2026-08-08 14:23:01 [wakeup +12s] network up
-2026-08-08 12:19:18 [watch] FOREIGN 감지 — 교정 시작
-2026-08-08 12:19:19 [watch] diskutil unmount force 성공 → state=ABSENT
-2026-08-08 12:19:20 [watch] 트리거 ls EPERM(예상됨 — 층 3, open은 이미 발생) → state=HEALTHY
-2026-08-08 12:19:20 [watch] 교정 완료 → HEALTHY
+2026-08-08 12:19:18 [watch] FOREIGN detected — starting remediation
+2026-08-08 12:19:19 [watch] diskutil unmount force succeeded → state=ABSENT
+2026-08-08 12:19:20 [watch] trigger ls EPERM (expected — Layer 3, open already happened) → state=HEALTHY
+2026-08-08 12:19:20 [watch] remediation complete → HEALTHY
 ```
 
-**상태 전이가 로그만으로 재구성되어야 한다.** 서브커맨드 출력을 원문 그대로 흘리면
-태그 없는 줄이 태그 줄 사이에 끼어들어, 예상된 실패(폴백 유발)와 진짜 실패를 구분할 수
-없게 된다. 원문은 버리지 않되 한 줄로 눌러 담아 태그 안에 넣고, 예상된 실패에는
-"(예상됨)"을 명시한다.
+**The state transitions have to be reconstructable from the log alone.** Letting
+subcommand output flow through verbatim inserts untagged lines between tagged ones,
+which makes an expected failure (the one that induces the fallback)
+indistinguishable from a real one. The original text is not discarded but squashed
+onto one line and carried inside the tag, and expected failures are marked
+"(expected)".
 
-훅 스크립트는 `exec >>"$LOG" 2>&1` 로 stdout 까지 흡수한다 — **태그 없는 줄이 보이면
-그 자체가 "누출 발생" 신호**라 진단에 유리하다. plist 의 `StandardOutPath`/`StandardErrorPath`
-는 같은 파일을 가리키게 해서, 스크립트가 `exec` 에 도달하기 전의 실패(shebang 오류 등)도
-잡는다.
+Hook scripts absorb stdout as well with `exec >>"$LOG" 2>&1` — **an untagged line
+is itself the signal that something leaked**, which helps diagnosis. The plist's
+`StandardOutPath` and `StandardErrorPath` point at the same file so that failures
+before the script reaches its `exec` (a bad shebang, for instance) are caught too.
 
-## 설정
+## Configuration
 
-환경 고유 값은 코드가 아니라 설정 파일에서 온다.
+Environment-specific values come from the configuration file, not from the code.
 
 ```
-호스트  /usr/local/etc/smb-guard.conf
-게스트  /etc/smb-guard.conf
+host   /usr/local/etc/smb-guard.conf
+guest  /etc/smb-guard.conf
 ```
 
-배치 시점에 값이 박혀야 하는 것(LaunchDaemon Label, systemd 의 `ConditionPathIsDirectory`·
-`ReadWritePaths`, newsyslog 경로, Samba 공유 정의)은 `*.in` 템플릿을 install 이 치환해
-생성한다 — systemd 는 이 필드들에서 환경변수를 확장하지 않는다.
+Anything that has to be baked in at deployment time (the LaunchDaemon Label,
+systemd's `ConditionPathIsDirectory` and `ReadWritePaths`, the newsyslog paths, the
+Samba share definition) is generated by the installer substituting a `*.in`
+template — systemd does not expand environment variables in those fields.
 
-**설정 파일은 실파일이어야 한다.** 심볼릭 링크로 워크스페이스 안의 정본을 가리키면,
-이 체계가 복구하는 바로 그 마운트가 끊긴 순간 복구 수단이 함께 사라진다.
+**The configuration file must be a real file.** If a symlink pointed it at a
+canonical copy inside the workspace, the means of recovery would vanish the moment
+the very mount this system recovers went away.
 
-## 게스트 측
+## The guest side
 
-| 구성요소 | 역할 |
+| Component | Role |
 |---|---|
-| Samba 공유 | `vfs_fruit` + `streams_xattr`. **차단(`veto files`)을 두지 않는다** |
-| `clockfix` + sudoers | 호스트 훅이 비대화형으로 호출하므로 NOPASSWD 가 필요하다 |
-| `mac-cruft-cleanup` + timer | 15분 주기 잔재 회수. 제거 건수를 journald 에 남긴다 |
-| NTP 데몬 | 각성 중 상시 권위 |
+| the Samba share | `vfs_fruit` + `streams_xattr`. **No blocking (`veto files`)** |
+| `clockfix` + sudoers | the host hook calls it non-interactively, so NOPASSWD is required |
+| `mac-cruft-cleanup` + timer | cruft reclamation every 15 minutes. Leaves the removal count in journald |
+| the NTP daemon | standing authority while awake |
 
-정리 타이머는 **모노토닉**(`OnBootSec` + `OnUnitActiveSec`)이다. `Persistent=` 는
-`OnCalendar` 전용이라 모노토닉 타이머에 적으면 조용히 무시되고 "놓친 실행을 따라잡는다"는
-오해만 남는다 — 그래서 두지 않는다. 부팅 5분 뒤 1회 실행되므로 다운타임 보정은 이미
-성립한다.
+The cleanup timer is **monotonic** (`OnBootSec` + `OnUnitActiveSec`). `Persistent=`
+is for `OnCalendar` only; on a monotonic timer it is silently ignored, leaving
+nothing but the false impression that "missed runs are caught up" — so it is not
+set. One run happens 5 minutes after boot, which already covers downtime.
 
-정리 스크립트는 **0건이면 아무것도 출력하지 않는다.** 로그가 조용한 것이 정상이라는
-뜻이지만, 그 대가로 "대상이 없어서 조용한 것"과 "고장나서 조용한 것"이 출력으로
-구분되지 않는다 — 실증할 때는 회수 대상을 남겨 둔 채 실행해야 한다.
+The cleanup script **prints nothing when the count is zero.** That means a quiet
+log is the healthy state, but the price is that "quiet because there was nothing to
+do" and "quiet because it is broken" are indistinguishable in the output — when
+demonstrating it, run it with reclamation targets deliberately left in place.

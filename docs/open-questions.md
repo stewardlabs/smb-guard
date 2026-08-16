@@ -1,135 +1,159 @@
-# 미결 과제와 잠복 위험
+# Open questions and latent risks
 
-확정된 것과 확정되지 않은 것을 구분해 둔다. **기각된 가설은 여기 없다** — 그것은
-[failure-model.md](failure-model.md) 와 [history/](history/) 에 있고, 다시 검증할 필요가
-없다는 것이 기록의 목적이다.
+What is settled is kept apart from what is not. **Rejected hypotheses are not
+here** — they are in [failure-model.md](failure-model.md) and [history/](history/),
+and the point of recording them is that they need no re-testing.
 
-## 잠복 위험 (증상 없음, 근거 있음)
+## Latent risks (no symptom, but with grounds)
 
-### 공유 루트에 워크스페이스 외의 이름이 생기는 것
+### Names other than the workspace appearing at the share root
 
-층 6(공유 루트 이름 충돌)의 처방은 공유 루트를 워크스페이스 상위로 올려 **충돌 집합을
-워크스페이스명 하나로 줄이는 것**이다. 그 하나는 남는다 — 워크스페이스 안에 공유 루트의
-엔트리명과 같은 이름의 파일을 만들면 그 파일은 덮어쓰거나 지울 수 없다.
+The remedy for Layer 6 (share root name collision) is to raise the share root above
+the workspace, **shrinking the collision set to the single workspace name**. That
+one remains — creating a file inside the workspace whose name matches an entry name
+at the share root makes that file impossible to overwrite or delete.
 
-git 내부 파일명(`config`·`index`·`HEAD`·`packed-refs`·`ORIG_HEAD`·`COMMIT_EDITMSG`)과는
-겹치지 않으므로 실질 위험은 낮다. **공유 루트를 전용 디렉터리로 두고 거기에 다른 것을
-두지 않는 한** 집합이 늘지 않는다는 것이 이 위험의 봉쇄 조건이다.
+It does not overlap git's internal filenames (`config`, `index`, `HEAD`,
+`packed-refs`, `ORIG_HEAD`, `COMMIT_EDITMSG`), so the practical risk is low. The
+containment condition for this risk is that the set does not grow **as long as the
+share root is a dedicated directory with nothing else in it.**
 
-재개 조건: 공유 루트에 무언가를 추가할 일이 생기면 그 이름이 워크스페이스 어디에도 파일명
-으로 등장하지 않는지 먼저 확인한다.
+Resume condition: if something ever needs to be added at the share root, first check
+that its name does not appear as a filename anywhere in the workspace.
 
-### `case sensitive = yes` 의 클라이언트 실효성
+### The client-side effect of `case sensitive = yes`
 
-git 이 대소문자를 구분하므로 서버도 구분하게 설정했다. 그런데 **macOS Finder 는 대소문자를
-무시하는 전제로 동작**하므로, 두 전제가 충돌하면 간헐적 "파일 없음"이 나타날 수 있다.
+git is case-sensitive, so the server was configured to be as well. But **the macOS
+Finder operates on the premise that case is ignored**, and where those two premises
+collide an intermittent "file not found" could appear.
 
-아직 실증하지 않았다. 증상이 나타나기 전까지는 잠복 위험으로만 등재한다. 발현한다면
-`case sensitive = auto` 와의 대조가 첫 실험이 될 것이다.
+This has not been demonstrated. Until a symptom appears it is registered only as a
+latent risk. Should it manifest, a comparison against `case sensitive = auto` would
+be the first experiment.
 
-### `fruit:resource = file` 이 만드는 `._*` 의 오인 삭제
+### Mistaken deletion of the `._*` files that `fruit:resource = file` creates
 
-정리 도구는 `._*` 를 macOS 잔재로 보고 회수한다. 그런데 **진짜 리소스 포크가 든 `._*`**
-가 워크스페이스에 들어오면 그것도 지운다.
+The cleanup tool treats `._*` as macOS cruft and reclaims it. But **a `._*` holding
+a genuine resource fork** entering the workspace would be deleted too.
 
-소스 코드 트리에서는 발생하지 않는다고 판단해 수용한 위험이다. 리소스 포크를 쓰는 파일
-(구형 Mac 문서, 일부 폰트·아카이브)을 이 공유에 두려면 `mac-cruft-cleanup` 의 파일
-목록에서 `._*` 를 빼야 한다.
+This risk was accepted on the judgement that it does not arise in a source code
+tree. To keep files that use resource forks (older Mac documents, some fonts and
+archives) on this share, remove `._*` from `mac-cruft-cleanup`'s file list.
 
-이것은 `fruit:resource = stream` 을 쓰지 않기로 한 결정의 대가다 — `stream` 은 xattr
-크기 한계 때문에 [층 5](failure-model.md#층-5--부수-파일-차단이-주-기능을-죽인다) 와
-같은 형태의 쓰기 실패를 새로 만든다.
+This is the price of the decision not to use `fruit:resource = stream` — `stream`
+would create a fresh write failure of the same shape as
+[Layer 5](failure-model.md#layer-5--blocking-incidental-files-kills-the-primary-function)
+because of the xattr size limit.
 
-### 층 7 쌍안정 — 캐시 활성/비활성을 결정하는 것
+### Layer 7 bistability — what determines whether the cache is active
 
-층 7 의 무기한 stale 은 상시가 아니라 **상태**다 — 같은 설정·프로세스·세션에서 캐시
-활성 상태(단발 읽기 무기한 stale)와 캐시 비활성 상태(모든 읽기가 서버 왕복, held-fd
-64KB×1000 전량 재전송 실측)가 모두 관측됐다. 초판이 "notify push 웨지"로 해석했던
-것은 후속 트래픽 실측으로 정정됐다 — 갈리는 것은 push 전달이 아니라 **클라이언트가
-데이터 캐시를 쓰는지 자체**다. lease `(RH)` 는 양 상태에서 똑같이 부여된다.
+The indefinite staleness of Layer 7 is not permanent but **a state** — in the same
+configuration, process and session, both a cache-active state (one-shot reads stale
+indefinitely) and a cache-inactive state (every read goes to the server; all 1000
+held-fd 64KB re-reads measured as retransmitted) were observed. What the first
+version interpreted as a "notify push wedge" was corrected by the follow-up traffic
+measurement — what differs is not push delivery but **whether the client uses its
+data cache at all**. The lease `(RH)` is granted identically in both states.
 
-무엇이 활성/비활성을 결정하는지 모른다. 후보는 맥 sleep/wake 의 세션 재개, 게스트
-시계 step(층 1), smbd reload 에 의한 lease epoch 갱신이며, inotify 큐 오버플로는 5만
-이벤트 폭풍으로 재유발에 실패해 단독으로는 기각에 가깝다.
+What determines active versus inactive is unknown. The candidates are session
+resumption across Mac sleep/wake, the guest clock step (Layer 1), and lease epoch
+renewal from an smbd reload; inotify queue overflow is close to rejected on its own,
+having failed to re-induce the state with a storm of 50,000 events.
 
-`nodatacache` 처방(층 7)은 이 트리거와 무관하게 위험 상태 진입을 봉쇄하므로, 이
-항목은 처방의 전제가 아니라 **모델의 완결성** 문제다.
+The `nodatacache` remedy (Layer 7) blocks entry into the dangerous state regardless
+of this trigger, so this item is a question of **model completeness**, not a
+premise of the remedy.
 
-재개 조건: `nodatacache` 적용 상태에서 stale 이 다시 관측되면 즉시 재개한다 — 그것은
-처방의 반증이기도 하다. 캐시 활성 상태를 만나면 층 7 의 채집 절차(트래픽 프로브 포함)를
-**reload 전에** 수행할 것.
+Resume condition: resume immediately if staleness is observed again with
+`nodatacache` applied — that would also be a refutation of the remedy. On
+encountering a cache-active state, run the Layer 7 collection procedure (including
+the traffic probe) **before reloading.**
 
-### `nodatacache` 실효의 캐시 활성 상태 대비 미검증
+### The effect of `nodatacache` is unverified against a cache-active state
 
-`nodatacache` 의 실효는 캐시 활성 상태(위험 상태)에서만 행동으로 드러나는데, 적용
-시점의 클라이언트가 캐시 비활성 상태여서 **행동 검증이 원리적으로 불가능했다** —
-기본 옵션 대조 마운트와 세 채널(반복 읽기 타이밍·open 지배 트래픽·held-fd 트래픽)
-모두에서 바이트 단위까지 동일했다. 옵션의 전달은 확인됐다 (`/etc/auto_smb` 맵 라인,
-`automount -vc` 후 재마운트).
+The effect of `nodatacache` only shows up behaviourally in the cache-active
+(dangerous) state, and the client was in the cache-inactive state when it was
+applied, so **behavioural verification was impossible in principle** — a
+default-options comparison mount matched byte for byte across all three channels
+(repeated-read timing, open-dominated traffic, held-fd traffic). Delivery of the
+option itself was confirmed (the `/etc/auto_smb` map line, remounted after
+`automount -vc`).
 
-실효 논거는 기전(데이터 캐시가 없으면 stale 할 캐시도 없다)과 매뉴얼 의미론에
-의존한다. 검증 가능 조건은 캐시 활성 상태의 재출현이며, 그때 기본 옵션 임시 마운트가
-stale 하고 운영 마운트가 신선하면 실증, 운영 마운트도 stale 하면 반증이다.
+The argument for its effect rests on the mechanism (with no data cache there is no
+cache to go stale) and on the manual's semantics. The condition for verification is
+the reappearance of a cache-active state: if a temporary default-options mount is
+then stale while the production mount is fresh, that demonstrates it; if the
+production mount is stale too, that refutes it.
 
-## 미확인
+## Unconfirmed
 
-### 층 6 수정의 백포트 시점
+### When the Layer 6 fix gets backported
 
-결함의 정체와 수정 커밋은 확정됐다(failure-model.md 층 6 '상류'). 남은 것은 **언제
-릴리스 브랜치에 들어오는가**이며, 그것은 우리 소관이 아니다.
+The identity of the defect and the fixing commit are settled (failure-model.md
+Layer 6, 'Upstream'). What remains is **when it lands on a release branch**, and
+that is not ours to decide.
 
-지금 확인해야 할 때는 Samba 를 올릴 때다. 다음 두 가지가 함께 참이면 공유 루트 상향을
-되돌릴지 재검토할 수 있다 — 되돌릴 **의무**는 없다. 공유 루트를 워크스페이스 상위에 두는
-것은 이 결함이 없어도 그 자체로 방어적이다.
+The time to check is when upgrading Samba. If both of the following hold, whether to
+undo the raised share root can be reconsidered — there is no **obligation** to undo
+it. Putting the share root above the workspace is defensive in its own right, even
+without this defect.
 
 ```bash
-# 설치된 버전에 수정이 들어왔는지 — dirfsp 를 쓰면 고쳐진 것
+# Whether the installed version carries the fix — using dirfsp means it is fixed
 grep -n -A12 'streams_xattr_unlinkat' source3/modules/vfs_streams_xattr.c | grep -n 'cwd_fsp\|dirfsp'
-# 실측 확인은 tools/probe-rename-collision.sh (공유 루트를 임시로 내려 보고 판정)
+# The empirical check is tools/probe-rename-collision.sh (temporarily lower the share root and judge)
 ```
 
-### 전체 디스크 접근 권한(FDA)의 도메인 간 상속
+### Cross-domain inheritance of Full Disk Access (FDA)
 
-sleepwatcher 바이너리에 부여한 FDA 가 **system 도메인(LaunchDaemon) 실행에서도 유효한지**
-확인하지 않았다. 경로 기반 grant 이므로 유지될 것으로 **추정**하나 실측하지 않았다.
+Whether the FDA granted to the sleepwatcher binary **also holds when executed in the
+system domain (as a LaunchDaemon)** was never confirmed. Being a path-based grant it
+is **presumed** to persist, but this was not measured.
 
-기능에는 영향이 없다 — 판정에 `ls` 결과를 쓰지 않도록 설계했기 때문이다. 이 항목이
-의미를 갖는 것은 로그의 EPERM 출현 빈도를 해석할 때뿐이다.
+There is no functional impact — the design deliberately avoids using `ls` results
+for determination. This item matters only when interpreting how often EPERM appears
+in the log.
 
-### 층 4-b 의 실행 컨텍스트 요인
+### The execution-context factor in Layer 4b
 
-가설 5건을 기각하고 남은 하나(launchd system 도메인 vs 로그인 세션)는 **셸에서 재현할 수
-없다.** 검증하려면 일회용 LaunchDaemon 이 필요하다.
+Five hypotheses were rejected, and the one that remains (launchd system domain vs
+login session) **cannot be reproduced from a shell.** Testing it would require a
+one-off LaunchDaemon.
 
-기능 영향이 없으므로(`diskutil` 이 1단계) 조사를 종료했다. **재개 조건을 로그에 내장해
-두었다** — `umount -f 폴백` 이 나타나면 그것이 신호다.
+The investigation was ended because there is no functional impact (`diskutil` is
+stage 1). **The resume condition is built into the log** — the appearance of
+`falling back to umount` is the signal.
 
-### 하이퍼바이저 시간 동기화의 콜드 스타트 거동
+### Cold-start behaviour of hypervisor time synchronisation
 
-게스트 NTP 를 죽이는 동작이 **콜드 스타트(전원 off → on)에서도 부재한지** 확인이 남았다.
-지금까지의 검증은 전부 웜 재부팅이었다.
+It remains to confirm that the behaviour which kills guest NTP is **also absent on a
+cold start (power off then on)**. Every check so far was a warm reboot.
 
 ```bash
-journalctl -b | grep -iE "set-ntp|Disabling unit"   # 0건이어야 한다
+journalctl -b | grep -iE "set-ntp|Disabling unit"   # must be 0
 systemctl is-enabled chrony && systemctl is-active chrony
 ```
 
-### `No locks available` (ENOLCK) 의 단일 원인
+### The single cause of `No locks available` (ENOLCK)
 
-맵 자격증명 부재와 시계 스큐가 **동시에** 있는 상태에서 관측되어 원인을 분리하지 못했다.
-자격증명 복원으로 해소됐으나 어느 쪽이 원인이었는지는 미확정이다.
+It was observed with a missing map credential and a clock skew present **at the same
+time**, so the causes could not be separated. Restoring the credential resolved it,
+but which of the two was the cause is undetermined.
 
-재발하면 시계가 정상인 상태에서 판별한다.
+If it recurs, determine it with the clock in a healthy state.
 
-## 개선 후보
+## Improvement candidates
 
-- **하이퍼바이저의 일시정지/재개 훅** — 현재는 호스트 수면만 다룬다. 게스트를 직접
-  pause/resume 하는 경우에도 시계 step 이 필요하다.
-- **정리 도구의 순회 비용 관찰** — 워크스페이스가 커지면 15분 주기 `find` 가 부담이 될
-  수 있다. 현재는 빌드 산출물 제외로 순회의 97% 를 걷어냈다.
-- **`nt acl support = no` 검토** — SMB 경유로 POSIX ACL(`+`)이 누적되는 경우.
+- **Hypervisor pause/resume hooks** — only host sleep is handled today. A clock step
+  is needed when the guest itself is paused and resumed too.
+- **Observing the cleanup tool's sweep cost** — as the workspace grows, a `find`
+  every 15 minutes could become a burden. Excluding build artefacts currently
+  removes 97% of the traversal.
+- **Considering `nt acl support = no`** — for cases where POSIX ACLs (`+`)
+  accumulate through SMB.
 
 ---
 
-기여 시: 여기에 항목을 추가할 때는 **증상·근거·재개 조건**을 함께 적어 주기 바란다.
-"확인 필요"만 적힌 항목은 다음 사람에게 판단 재료를 주지 못한다.
+When contributing: please record the **symptom, the grounds and the resume
+condition** together when adding an item here. An item that says only "needs
+checking" gives the next person nothing to judge with.

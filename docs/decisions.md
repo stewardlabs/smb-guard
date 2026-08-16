@@ -1,329 +1,404 @@
-# 결정 기록과 설계 원칙
+# Decision log and design principles
 
-**근거가 소멸하면 정책도 재검토 대상이다.** 그래서 결정과 함께 그 근거를, 그리고 기각된
-선택지를 기록한다. 다음 사람이 이미 반증된 길을 다시 걷지 않게 하는 것이 이 문서의 목적이다.
+**When the rationale is gone, the policy is up for review too.** That is why each
+decision is recorded with its rationale and with the options that were rejected. The
+purpose of this document is to keep the next person from walking a road that has
+already been refuted.
 
 ---
 
-## 결정 기록
+## Decision log
 
-### 만료 창을 줄이지 않고 제거한다
+### Eliminate the expiry window rather than shorten it
 
-`AUTOMOUNT_TIMEOUT=604800`(7일). `backupd` 가 30분 주기로 접근하므로 **1800초 이상의 어떤
-유한 타임아웃도 단독으로는 무의미**하다. 창의 길이가 아니라 창의 존재가 문제다.
+`AUTOMOUNT_TIMEOUT=604800` (7 days). `backupd` touches the share every 30 minutes,
+so **no finite timeout above 1800 seconds means anything on its own**. The problem
+is the window's existence, not its length.
 
-### `backupd` 차단을 포기한다
+### Give up on blocking `backupd`
 
-`tmutil disable` 은 무효였다(비활성화 후에도 접근 7회 지속 실측). `addexclusion` 은 층이
-맞지 않는다 — 스냅샷 대상 제외이지 접근 차단이 아니다. **차단이 불가능하면 창을 없애고
-즉시 교정한다.**
+`tmutil disable` had no effect (measured: 7 accesses continued after disabling).
+`addexclusion` targets the wrong layer — it excludes from snapshots, it does not
+block access. **When blocking is impossible, eliminate the window and remediate
+immediately.**
 
-### 마운트 이벤트 훅으로 즉시 교정한다
+### Remediate immediately via the mount event hook
 
-주기 폴링이 아니라 `StartOnMount` 다. 하이재킹이 발생하는 순간이 곧 마운트 이벤트이므로,
-정확히 그 시점에 발화한다. 각성 중 자가치유가 부재했던 것이 이 결정의 계기였다.
+`StartOnMount`, not periodic polling. The moment hijacking occurs is itself a mount
+event, so it fires at exactly that point. The absence of self-healing while awake was
+what prompted this decision.
 
-무관한 마운트(USB 등)에도 발화하지만 비용은 mount 테이블 1회 조회뿐이다.
+It also fires for unrelated mounts (a USB stick, say), but the cost is one mount
+table lookup.
 
-### 교정 주체를 하나로 유지한다
+### Keep a single remediation agent
 
-웨이크 훅도 수동 도구도 자체 마운트 로직을 갖지 않고 `smb-guard` 에 위임한다. 판정
-기준이 갈라지는 것이 이 체계에서 가장 위험한 종류의 버그이기 때문이다.
+Neither the wake hook nor the manual tool carries its own mount logic; both delegate
+to `smb-guard`. Diverging determination criteria are the most dangerous class of bug
+in this system.
 
-**공용 라이브러리의 경계**: 읽기 전용(상수·로깅·상태 판정·자격 전환)만 공유하고,
-상태를 바꾸는 코드(`force_umount`/`trigger`/재시도)는 `smb-guard` 안에만 둔다. 지키려는
-불변식은 "교정 주체는 하나"이지 "코드가 한 파일에 있다"가 아니다 — 판정 로직 공유는
-오히려 그 불변식을 강화한다.
+**The boundary of the shared library**: only read-only material is shared
+(constants, logging, state determination, credential switching), while code that
+changes state (`force_umount`, `trigger`, retries) stays inside `smb-guard`. The
+invariant being protected is "there is one remediation agent", not "the code lives in
+one file" — sharing the determination logic actually strengthens that invariant.
 
-### 판정에 경로 접근을 쓰지 않는다
+### Do not use path access for determination
 
-`mount` 테이블만 읽는다. 경로 접근은 (i) 그 자체가 자동 마운트를 트리거해 측정 대상을
-바꾸고 (ii) 데몬 컨텍스트에서 TCC 오판을 낳는다. 이 하나로 층 3 이 구조적으로 소멸하고
-FDA 도 불필요해진다.
+Read the `mount` table only. Path access (i) itself triggers the automounter and
+changes what is being measured, and (ii) produces a TCC misjudgement in a daemon
+context. This one decision makes Layer 3 structurally disappear and renders FDA
+unnecessary.
 
-### 배치를 system 도메인으로 통일한다
+### Unify deployment into the system domain
 
-두 훅이 같은 마운트를 다른 UID 로 건드리는 구조는 권한·경합 문제의 온상이고, 로그 경로도
-필연적으로 갈라진다. 대가는 사용자 자격이 필요한 4개 지점(ssh, GUI `open`, 트리거 `ls`,
-키체인 프로브)이고, 이것은 명시적 래퍼로 흡수할 수 있다.
+A structure where two hooks touch the same mount under different UIDs is a breeding
+ground for permission and race problems, and the log paths inevitably diverge too.
+The price is four points that need user credentials (ssh, the GUI `open`, the trigger
+`ls`, the keychain probe), and those can be absorbed by explicit wrappers.
 
-로그아웃/로그인 화면 상태의 수면·웨이크까지 커버되는 것은 부수 이득이다.
+Covering sleep and wake at the logout/login window is an incidental gain.
 
-### sleepwatcher 를 brew 서비스에서 뗀다
+### Detach sleepwatcher from the brew service
 
-Homebrew 는 formula 의 service DSL 로 plist 를 생성하므로 `brew upgrade` 시 손수정이
-소실된다. `-s`/`-w` 경로 지정이 날아가면 sleepwatcher 는 기본값(`~/.sleep`, `~/.wakeup`)을
-찾고, 그 파일이 없으면 **훅이 침묵 실패한다.**
+Homebrew generates the plist from the formula's service DSL, so a hand edit is lost
+on `brew upgrade`. If the `-s`/`-w` path arguments vanish, sleepwatcher looks for its
+defaults (`~/.sleep`, `~/.wakeup`), and when those files do not exist **the hooks
+fail silently.**
 
-### 실행 파일 이름에 계열 접두사를 붙인다
+### Prefix executable names with the family name
 
-`/usr/local/sbin/sleep` 같은 이름은 절대 쓰지 않는다. `/usr/local/sbin` 은 기본 PATH 에서
-`/bin` 보다 **앞**에 오므로, root 셸이나 스크립트의 `sleep 5` 가 훅을 실행하게 된다 —
-디버깅이 극도로 어려운 종류의 사고다.
+Never use a name like `/usr/local/sbin/sleep`. `/usr/local/sbin` comes **before**
+`/bin` on the default PATH, so a `sleep 5` in a root shell or a script would execute
+the hook — an extraordinarily hard accident to debug.
 
-### 로그를 한 파일로 통합하고 newsyslog 로 회전한다
+### Unify the logs into one file and rotate with newsyslog
 
-wake → guard 발화 → 수동 개입이 인과적으로 얽혀 있어, 파일이 갈리면 추적할 때마다
-타임스탬프를 손으로 대조해야 한다. 태그(`[watch] [ensure] [wakeup +Ns] [smbfix]`)로 충분히
-구분된다.
+wake -> guard firing -> manual intervention are causally entangled, so with separate
+files every trace means correlating timestamps by hand. The tags
+(`[watch] [ensure] [wakeup +Ns] [smbfix]`) distinguish them well enough.
 
-회전은 자체 truncate 가 아니라 OS 의 `newsyslog` 를 쓴다. 크기 초과 시 `: > file` 로
-비우는 방식은 롤링이 아니라 **전량 소실**이며, 하필 사고 직후에 로그를 잃는다.
+Rotation uses the OS's `newsyslog` rather than self-truncation. Emptying with
+`: > file` on a size overflow is not rolling but **total loss**, and it loses the log
+right after an incident, of all times.
 
-> 상주 프로세스는 회전된 로그의 fd 를 계속 쥔다. sleepwatcher 에 `-V`(verbose)를 켜지
-> 않는 이유가 이것이다 — 출력이 거의 없으면 실질적 영향이 없다.
+> A resident process keeps holding the fd of a rotated log. That is why `-V`
+> (verbose) is not enabled on sleepwatcher — with almost no output there is no
+> practical impact.
 
-### 관찰용 코드를 임계 경로 밖에 둔다
+### Keep observational code off the critical path
 
-`pmset -g log` 는 전원 로그 전체를 파싱하며 **실측 11초**가 걸린다. 이 호출이 게이트
-직후에 있던 시절, 순수 관찰용 코드가 네트워크 대기·시계 교정·마운트 보장 전부를 11초
-뒤로 밀었다 — 성능 목표를 못 지킨 유일한 원인이었다.
+`pmset -g log` parses the entire power log and takes **a measured 11 seconds**. Back
+when this call sat right after the gate, purely observational code pushed the network
+wait, clock correction and mount assurance all 11 seconds later — the only reason the
+performance target was missed.
 
-**관찰을 없애지 않고 옮겼다.** 웨이크 유형은 층 2 판정의 1차 증거라 진단 가치가 크다.
-마운트가 사용 가능해진 뒤에 수집해도 데이터는 동일하게 유효하다. wake+15초 → **wake+4초**.
+**The observation was moved, not removed.** The wake type is primary evidence for
+Layer 2 determination and has real diagnostic value. Collected after the mount is
+usable, the data is equally valid. wake+15s -> **wake+4s**.
 
-### 구조화된 데이터를 텍스트로 파싱하지 않는다
+### Do not parse structured data as text
 
-plist 는 `PlistBuddy`/`plutil` 로 읽는다. `grep`/`awk` 는 (i) 의도치 않은 필드에 매칭되고
-(ii) 포맷이 바뀌면(XML→바이너리) 통째로 실패한다. 실제로 `/sleepwatcher</` 패턴이 Label
-**값**에 매칭되어 정상 설치인데도 설치가 중단된 적이 있다.
+Read plists with `PlistBuddy`/`plutil`. `grep`/`awk` (i) match fields you did not
+intend and (ii) fail wholesale when the format changes (XML -> binary). A
+`/sleepwatcher</` pattern actually matched the Label **value** and aborted a
+perfectly good installation.
 
-### 시계 계층에서 하이퍼바이저 동기화를 제외한다
+### Exclude hypervisor synchronisation from the clock layers
 
-배타가 선택이 아니라 강제였다 — 상세는 [failure-model.md](failure-model.md) 층 1.
-공존이 불가능하면 **계측 가능한 쪽을 남긴다.**
+Exclusivity was forced, not chosen — details in [failure-model.md](failure-model.md)
+Layer 1. When coexistence is impossible, **keep the instrumentable one.**
 
-`clockfix` 에 소수점 epoch 를 쓰는 이유: 정수 절삭(최대 1초)이 오차의 지배 항이었다.
-macOS `date` 의 `%N` 부재는 `perl -MTime::HiRes` 로 우회한다. RTT/2 보상은 **기각** —
-그 이하는 NTP 데몬의 관할이며, 거친 보정 단계에 정밀 로직을 넣는 것은 역할 분리 위반이다.
+Why `clockfix` uses a fractional epoch: integer truncation (up to 1 second) was the
+dominant error term. macOS `date` lacking `%N` is worked around with
+`perl -MTime::HiRes`. RTT/2 compensation was **rejected** — anything below that is
+the NTP daemon's remit, and putting precision logic into a coarse correction step
+violates the role split.
 
-### 게스트 통합 도구를 설치하지 않는다
+### Do not install the guest integration tools
 
-위 결정의 후속이다. `--time-sync off` 는 배타를 **끄는** 것이고 미설치는 배타를 **없애는**
-것이다. 설정은 자동 업데이트·재설치·구성 복원으로 되돌아갈 수 있는데, 되돌아간 상태가
-로그를 남기지 않으므로 다음 스큐까지 발견되지 않는다 — 되돌아갈 수 있는 방어는 방어가
-아니라 유예다.
+A follow-on from the decision above. `--time-sync off` **turns** the exclusivity off;
+not installing **removes** it. A setting can be reverted by an auto-update, a
+reinstall or a configuration restore, and the reverted state leaves no log, so it
+goes undetected until the next skew — a defence that can be reverted is not a defence
+but a reprieve.
 
-비용이 0 인 것이 이 결정을 쉽게 만든다. 헤드리스 개발 게스트에서 도구가 주는 나머지 기능
-(클립보드·디스플레이·공유 폴더·호스트 hosts 자동 등록)은 불필요하거나 이 설계가 반대
-방향으로 쓴다. 근거표와 제거 절차는 [failure-model.md](failure-model.md) 층 1.
+That the cost is zero makes this decision easy. On a headless development guest the
+tools' remaining features (clipboard, display, shared folders, automatic host hosts
+registration) are either unnecessary or used in the opposite direction by this
+design. The rationale table and the removal procedure are in
+[failure-model.md](failure-model.md) Layer 1.
 
-**게스트 고정 IP 가 짝이다.** 호스트 `/etc/hosts` 자동 등록을 포기하는 대신 정적 항목을
-쓰며, mDNS 로 대체하지 않는다(수면 복귀 직후 재광고 지연이 웨이크 훅을 막는다).
+**A static guest IP is the matching half.** Giving up automatic `/etc/hosts`
+registration on the host means using a static entry, and not replacing it with mDNS
+(re-advertisement lag right after waking blocks the wake hook).
 
-### 점검을 설치와 분리한다
+### Separate inspection from installation
 
-`install.sh` 가 재실행으로 복구할 수 있는 것은 자기가 배치한 것뿐이다. 그런데 이 체계가
-기대는 전제 중 **autofs 3종은 의도적으로 install 의 관할 밖**이고(아래 '게스트 Samba 설정은
-자동 배치하지 않는다'와 같은 논리), OS 메이저 업그레이드는 정확히 그 파일들을 기본값으로
-되돌린다. 재설치로 낫지 않는 고장이 있으므로 **점검이 설치와 별도의 도구**여야 한다.
+All `install.sh` can restore on a re-run is what it deployed itself. But among the
+premises this system rests on, **the autofs trio is deliberately outside install's
+remit** (the same logic as 'Do not deploy the guest Samba configuration
+automatically' below), and a macOS major upgrade reverts precisely those files to
+defaults. Since there are faults a reinstall does not fix, **the inspection has to be
+a tool separate from the install.**
 
-`tools/doctor.sh` 는 읽기 전용이며 자동 교정하지 않는다(원칙 21). 판정을 파일 존재가 아니라
-**실제 로드 상태**로 하는 것이 핵심이다 — 백그라운드 항목 승인이 리셋되면 plist 는 그대로인데
-잡은 죽어 있고, 그 상태는 `ls` 로 구분되지 않는다.
+`tools/doctor.sh` is read-only and never remediates automatically (Principle 21).
+The key point is that its verdict comes from **the actual load state** rather than
+from file existence — when Background Items approval is reset, the plist is intact
+while the job is dead, and `ls` cannot tell those apart.
 
-종료 코드를 0(정상)·1(이상)·2(**판정 불완전** — root 필요 항목을 건너뜀)로 나눈 것은
-원칙 25 의 적용이다. 건너뛴 항목의 침묵을 정상으로 읽으면, 점검 도구 자신이 "조용함은 두
-가지를 뜻한다"는 함정에 빠진다.
-
-### 차단을 폐지하고 사후 정리로 대체한다
-
-요구는 "막는다"가 아니라 "남지 않는다"였다. 상세와 실증은 [failure-model.md](failure-model.md)
-층 5.
-
-**운영 계약**: 잔재가 다시 문제가 되면 **정리 쪽을 손본다.** 차단 복원은 `-8062` 의
-재도입이다.
-
-### `.Trashes` 는 즉시 삭제하지 않고 7일 유예한다
-
-되돌릴 수 없는 휴지통은 휴지통이 아니다. Finder 의 "휴지통으로 이동"이 사실상의 즉시
-삭제가 되면 사용자가 그것을 신뢰할 수 없다. 추적되지 않는 파일(빌드 산출물, 로컬 설정)이
-여기로 들어올 수 있다는 것도 이유다.
-
-### 정리 순회에서 빌드 산출물을 제외한다
-
-실측 표본에서 순회 항목의 **97%가 `target/`·`node_modules/`** 였다. 그 안의 잔재를
-남기는 대가는 사실상 없다 — 빌드 산출물은 이미 git ignore 대상이라 이력을 오염시키지
-않고, 빌드 캐시 정리와 함께 사라진다. 비용만 있고 이득이 없는 순회였다.
-
-`find` 의 `-name` 은 경로가 아니라 **이름**으로 매칭하므로 깊이와 무관하다 — 워크스페이스가
-여러 레포를 품고 `.git` 이 여러 깊이에 흩어져 있어도 전부 자동 제외된다.
-
-### 설정 파일을 심볼릭 링크로 배포하지 않는다
-
-이 체계가 복구하는 대상이 워크스페이스 마운트인데, 설정을 그 마운트 안의 정본에 링크하면
-**마운트가 끊긴 순간 복구 수단이 함께 사라진다.** 순환 의존이다. 실파일로 복사한다.
-
-### install 스크립트를 유지한다
-
-수동 배치도 가능하도록 문서에 대조표를 두지만([install.md](install.md)), 스크립트를
-없애지는 않는다. 이 체계의 지배적 실패 모드가 **"권한이 틀리면 조용히 무시된다"**이기
-때문이다:
-
-- `newsyslog` 설정이 `root:wheel 644` 가 아니면 → 말없이 무시 (로그 무한 증식, 무증상)
-- LaunchDaemon plist 가 그렇지 않으면 → launchd 가 로드 거부
-- `/usr/local/sbin` 스크립트에 group/other 쓰기 비트 → root 권한 상승 취약점
-- sudoers 가 0440 이 아니면 → `visudo` 가 경고
-
-### 게스트 Samba 설정은 자동 배치하지 않는다
-
-기존 `smb.conf` 를 통째로 덮으면 이 공유와 무관한 설정이 사라진다. 기본 동작은 치환
-결과를 출력해 사람이 병합하게 하는 것이고, `--samba` 를 명시해야 배치하며 그때도 기존
-파일을 백업한다.
-
-### 공유 루트를 워크스페이스 자신이 아니라 그 상위에 둔다
-
-Samba 는 파일 삭제 시 스트림을 지우며 basename 을 공유 루트 기준으로 해석하는 결함이
-있어, **공유 루트의 엔트리명과 같은 basename 을 가진 기존 파일은 트리 어디에서도 덮어쓰거나
-지울 수 없다.** 워크스페이스를 직접 내보내면 그 루트의 모든 이름이 곧 충돌 집합이 된다 —
-`.git/config` 가 여기 걸려 git 이 깨진다. 상세와 실증은 [failure-model.md](failure-model.md)
-층 6.
-
-공유 루트를 한 단계 위로 올리면 충돌 집합이 워크스페이스명 하나로 줄고, 클라이언트는
-공유의 하위 디렉터리를 마운트하므로 **보이는 레이아웃은 달라지지 않는다.**
-
-스트림 쪽을 끄는 대안(`fruit:metadata = netatalk` + `streams_xattr` 제거)도 동작하지만
-소파일 생성이 5배 느리고 파일마다 `._` 사이드카가 생겨 택하지 않았다. 클라이언트
-마운트 옵션(`nostreams` 등)은 스트림을 서버가 보고하므로 무효다.
-
-**운영 계약**: 공유 루트에는 워크스페이스 외의 것을 두지 않는다. 여기 생기는 이름은
-그대로 "트리 전역에서 치환 불가한 basename" 이 된다.
-
-### 잔재 정리는 공유 루트도 깊이 1 로 훑는다
-
-Finder 는 잔재를 **마운트된 공유의 루트에** 만든다. 위 결정으로 공유 루트가 워크스페이스
-밖으로 나갔으므로, 워크스페이스 순회만으로는 그곳에 닿지 않는다 — 특히 `.Trashes` 는
-Finder 로 지운 파일이 회수되지 않은 채 남는다.
-
-깊이 1 이라 순회 비용은 사실상 0 이다. **스크립트와 systemd 유닛을 함께 고쳐야 한다** —
-`ProtectSystem=strict` 아래에서 `ReadWritePaths` 에 없는 경로는 읽기 전용이고, 삭제
-실패는 조용하다. 둘 중 하나만 고치면 "정리하는 것처럼 보이지만 아무것도 지워지지 않는"
-상태가 된다.
-
-### 층 7 의 처방을 클라이언트 캐시 차단으로 한다 — 서버측 oplock 이 아니라
-
-게스트 로컬 쓰기의 stale(층 7)에 세 후보를 실측 대조했다: 서버측 `kernel oplocks`,
-클라이언트 `nodatacache`/`nomdatacache`, 현행 유지. `nodatacache` 를 채택했다.
-
-결정 축은 두 개다. **첫째, 상태 비의존** — stale 은 클라이언트 데이터 캐시가 활성인
-상태에서만 존재하는데, 그 활성/비활성이 침묵으로 전환되는 것이 층 7 의 본질이다
-(후속 실측으로 정정된 해석 — 층 7 '쌍안정' 참조). `nodatacache` 는 위험 상태로의 진입
-자체를 봉쇄해 상태 전환과 notify 어느 쪽에도 의존하지 않는다. 후보 중 유일하다.
-**둘째, 비용** — 4개 단일 패스 작업 부하(A-B-B-A 교차)에서 회귀가 측정되지 않았고,
-메타 캐시는 살아 있으므로 `stat()` 지배 작업이 다치지 않는다. 캐시 활성 상태 대비
-재읽기-집중 작업 비용은 미측정이나 소파일 왕복은 ms 미만이라 수용했다.
-
-`kernel oplocks` 는 가설("커널 break 로 캐시를 켠 채 일관성")이 실측에서 무너져
-기각했다 — SMB2/3 클라이언트에는 빈 lease 가 부여되어 깰 것 자체가 없고, 실효는 공유
-전체의 캐싱 몰수다. `nomdatacache` 는 열거 지배 작업 2.5~4.3배로 기각. 상세는
-failure-model.md 층 7, 재검토 조건은 open-questions.md.
+Splitting the exit code into 0 (healthy), 1 (faults) and 2 (**verdict incomplete** —
+root-only items were skipped) is an application of Principle 25. Reading the silence
+of a skipped item as healthy would make the inspection tool itself fall into the
+"silence means two different things" trap.
+
+### Abolish blocking and replace it with post-hoc cleanup
+
+The requirement was not "block it" but "it does not remain". The detail and the
+demonstration are in [failure-model.md](failure-model.md) Layer 5.
+
+**Operational contract**: if cruft becomes a problem again, **fix the cleanup side.**
+Restoring blocking is a reintroduction of `-8062`.
+
+### Give `.Trashes` a 7-day grace period rather than deleting immediately
+
+A trash you cannot undo is not a trash. If the Finder's "Move to Trash" becomes an
+effective immediate delete, the user cannot trust it. That untracked files (build
+artefacts, local configuration) can end up in there is another reason.
+
+### Exclude build artefacts from the cleanup sweep
+
+In a measured sample, **97% of the swept entries were under `target/` or
+`node_modules/`**. Leaving the cruft inside them costs effectively nothing — build
+artefacts are already covered by git ignore, so they do not pollute history, and they
+disappear along with a build cache clean. It was a sweep with cost and no benefit.
+
+`find`'s `-name` matches on **the name**, not the path, so it is independent of
+depth — even when a workspace holds several repositories with `.git` scattered at
+various depths, they are all excluded automatically.
+
+### Do not deploy the configuration file as a symlink
+
+What this system recovers is the workspace mount, so linking the configuration to a
+canonical copy inside that mount would make **the means of recovery vanish the moment
+the mount goes away.** It is a circular dependency. Copy it as a real file.
+
+### Keep the install script
+
+The documentation carries a placement table so manual deployment is possible too
+([install.md](install.md)), but the script is not going away. The reason is that this
+system's dominant failure mode is **"wrong permissions are silently ignored"**:
+
+- a `newsyslog` configuration that is not `root:wheel 644` -> ignored without a word
+  (the log grows without bound, no symptom)
+- a LaunchDaemon plist that is not -> launchd refuses to load it
+- group/other write bits on a script in `/usr/local/sbin` -> a root privilege
+  escalation vulnerability
+- sudoers that is not 0440 -> `visudo` warns
+
+### Do not deploy the guest Samba configuration automatically
+
+Overwriting an existing `smb.conf` wholesale would lose settings unrelated to this
+share. The default behaviour is to print the substituted result for a human to merge;
+`--samba` must be given explicitly to deploy it, and even then the existing file is
+backed up.
+
+### Put the share root above the workspace, not at it
+
+Samba has a defect where deleting a file clears its streams while resolving the
+basename relative to the share root, so **an existing file whose basename matches an
+entry name at the share root cannot be overwritten or deleted anywhere in the tree.**
+Exporting the workspace directly makes every name at that root the collision set —
+`.git/config` gets caught by it and git breaks. The detail and the demonstration are
+in [failure-model.md](failure-model.md) Layer 6.
+
+Raising the share root one level shrinks the collision set to the single workspace
+name, and since the client mounts a subdirectory of the share, **the visible layout
+does not change.**
+
+The alternative of turning the streams off (`fruit:metadata = netatalk` + removing
+`streams_xattr`) also works, but small-file creation is 5x slower and every file
+gets a `._` sidecar, so it was not chosen. Client mount options (`nostreams` and the
+like) have no effect, because the server is what reports the streams.
+
+**Operational contract**: put nothing but the workspace at the share root. Any name
+that appears there becomes an "irreplaceable basename across the whole tree".
+
+### Sweep the share root at depth 1 during cruft cleanup
+
+The Finder creates its cruft **at the root of the mounted share.** The decision above
+moved the share root outside the workspace, so a workspace-only sweep no longer
+reaches it — and `.Trashes` in particular keeps files deleted through the Finder
+unreclaimed.
+
+At depth 1 the traversal cost is effectively zero. **The script and the systemd unit
+have to be fixed together** — under `ProtectSystem=strict` a path not in
+`ReadWritePaths` is read-only, and the deletion failure is silent. Fixing only one of
+the two produces a state that "looks like it is cleaning while deleting nothing".
+
+### Make the Layer 7 remedy a client cache block, not server-side oplocks
+
+Three candidates were measured against the staleness of guest-local writes
+(Layer 7): server-side `kernel oplocks`, client-side `nodatacache`/`nomdatacache`,
+and doing nothing. `nodatacache` was chosen.
+
+There are two decision axes. **First, state independence** — staleness exists only
+while the client data cache is active, and the essence of Layer 7 is that active
+versus inactive transitions silently (an interpretation corrected by a follow-up
+measurement — see 'Bistability' in Layer 7). `nodatacache` contains entry into the
+dangerous state itself and depends on neither the state transition nor notify. It is
+the only candidate that does. **Second, cost** — no regression was measured across 4
+single-pass workloads (A-B-B-A crossover), and the metadata cache stays alive so
+`stat()`-dominated work is unharmed. The cost of re-read-intensive work relative to
+the cache-active state is unmeasured, but a small-file round trip is under a
+millisecond, so it was accepted.
+
+`kernel oplocks` was rejected when its hypothesis ("a kernel break gives consistency
+with the cache left on") collapsed under measurement — an SMB2/3 client is handed an
+empty lease, so there is nothing to break, and the net effect is confiscation of
+caching for the whole share. `nomdatacache` was rejected at 2.5-4.3x on
+enumeration-dominated work. The detail is in failure-model.md Layer 7, and the
+conditions for reconsidering in open-questions.md.
 
 ---
 
-## 설계 원칙
+## Design principles
 
-고장 모델을 규명하는 과정에서 얻은 것들이다. 순서는 발견 순이 아니라 주제별이다.
+These were all obtained in the course of working out the failure model. The order is
+by theme, not by discovery.
 
-### 판정과 관찰
+### Determination and observation
 
-1. **하이퍼바이저(또는 상위 계층)를 우선하되, "작동 중"이라는 가정도 실측 검증하라.**
-   프로세스 생존 ≠ 기능 동작. 초록불 상태로 21시간 스큐가 통과했다.
-2. **감시 채널의 권한 경계를 의심하라.** launchd 컨텍스트 ≠ 사용자 터미널.
-3. **판정은 1차 증거로 하라.** mount 테이블·에러 코드·저널. 대화상자 메시지가 아니라.
-4. 개입 루프에는 캐시 플러시와 소유자 검사를 포함하라.
-5. **정책은 근거와 함께 기록하라.** 근거가 소멸하면 정책도 재검토 대상이다.
-6. **설정이 실제로 적용되었는지 먼저 검증하라.** 이 원칙이 세 번 걸렸다: 타임아웃 값
-   미반영, 시계 교정 미실행, sudoers 권한 이상. 세 번째의 교훈은 방향이 반대였다 —
-   **경고가 곧 무효는 아니었다.** 검증은 경고를 읽는 것이 아니라 실효를 직접 조회하는
-   것(`sudo -l`)이었다.
-7. 자가치유의 트리거를 다양화하라.
-8. **판정 행위가 대상을 바꾸지 않게 하라.**
+1. **Prefer the hypervisor (or any higher layer), but verify the assumption that it
+   is "working" by measurement too.** A process being alive is not the feature
+   working. A 21-hour skew went through while the light was green.
+2. **Suspect the privilege boundary of your monitoring channel.** A launchd context
+   is not a user's terminal.
+3. **Base determination on primary evidence.** The mount table, error codes, the
+   journal. Not a dialog's message.
+4. Include a cache flush and an ownership check in the intervention loop.
+5. **Record a policy together with its rationale.** When the rationale is gone, the
+   policy is up for review too.
+6. **First verify that a setting was actually applied.** This principle caught three
+   things: an unapplied timeout value, an unexecuted clock correction, and wrong
+   sudoers permissions. The lesson of the third pointed the other way —
+   **a warning did not mean it was void.** Verification was not reading the warning
+   but querying what was actually in effect (`sudo -l`).
+7. Diversify the triggers of self-healing.
+8. **Do not let the act of determination change its subject.**
 
-### 실패의 표현
+### Expressing failure
 
-9. **성공을 반환하기 전에 실제로 무언가 했는지 확인하라.** 침묵 성공은 침묵 실패보다
-   나쁘다 — 호출자가 후속 판단을 그 위에 쌓는다. "물러남"이 올바른 경로와 "실패"가
-   올바른 경로를 호출 의도로 구분하라.
-10. **잠금·플래그 등 배타 자원에는 만료를 함께 설계하라.** 정리 코드가 실행되지 않는
-    경로(SIGKILL, 패닉)가 반드시 존재하며, 만료가 없으면 그 순간부터 시스템이 **무증상으로**
-    죽는다.
-11. **실행 파일 이름은 PATH 전역에서 유일해야 한다.**
-12. **관찰용 코드를 임계 경로에 두지 마라.** 진단 가치가 있는 호출일수록 비싸다.
-    원칙 8 의 시간축 버전이다.
-13. **구조화된 데이터를 텍스트로 파싱하지 마라.**
-14. **로그의 계층 접두사는 한 곳에서만 붙인다.** 하위 도구가 이미 자기를 식별하면 상위에서
-    덧붙이지 않는다.
-15. **예상된 실패에는 "예상됨"이라고 적어라.** 폴백 체인과 무시하도록 설계된 오류가
-    진짜 실패와 구분되지 않으면, 정상 동작이 고장처럼 읽힌다. 서브커맨드 출력을 원문
-    그대로 흘리지 말고 태그 안에 담고, 각 단계 뒤의 상태를 함께 남겨 **인과가 로그만으로
-    재구성되게** 하라.
-16. **한 컴포넌트에서 검증된 권한이 다른 컴포넌트에서도 성립한다고 가정하지 마라.**
-    TCC 는 responsible process 단위로 귀속된다.
+9. **Confirm that something actually happened before returning success.** Silent
+   success is worse than silent failure — the caller stacks subsequent judgements on
+   top of it. Distinguish, by the caller's intent, the paths where backing off is
+   correct from the paths where failing is correct.
+10. **Design an expiry alongside any exclusive resource such as a lock or a flag.**
+    A path where the cleanup code does not run (SIGKILL, a panic) always exists, and
+    without an expiry the system dies **asymptomatically** from that moment on.
+11. **An executable's name must be unique across the whole PATH.**
+12. **Do not put observational code on the critical path.** The more diagnostic value
+    a call has, the more expensive it tends to be. The time-axis version of
+    Principle 8.
+13. **Do not parse structured data as text.**
+14. **A layer prefix is attached in exactly one place.** When a lower tool already
+    identifies itself, the layer above does not add to it.
+15. **Write "expected" on an expected failure.** When a fallback chain and errors
+    designed to be ignored are indistinguishable from real failures, normal operation
+    reads as a fault. Do not let subcommand output flow through verbatim; carry it
+    inside the tag, and record the state after each stage as well, so that **the
+    causality is reconstructable from the log alone**.
+16. **Do not assume that a privilege verified in one component holds in another.**
+    TCC attributes per responsible process.
 
-### 개입의 설계
+### Designing intervention
 
-17. **권한이 필요한 작업은 직접 하기보다 권한을 가진 시스템 데몬에 위임하라.**
-    `diskutil`(→ `diskarbitrationd`)이 `umount`(직접 syscall)보다 안정적인 이유는 호출자의
-    실행 컨텍스트에 덜 의존하기 때문이다.
-18. **폴백은 지우지 말고 순서를 바꿔라.** "1단계가 항상 실패한다"의 올바른 처방은 삭제가
-    아니라 강등이다. 삭제하면 남은 단계가 실패할 때 대안이 사라지고, 강등하면 잡음만
-    사라진다. 부수 효과로 **그 메시지가 다시 나타나는 것 자체가 이상 신호**가 된다.
-19. **가설이 반증되어도 그 위에서 내린 결정이 반드시 무효가 되는 것은 아니다.** 결정의
-    근거가 "관측된 사실"이었는지 "그 사실에 대한 설명"이었는지 구분하라. 순서 반전은
-    "데몬에서 항상 실패한다"는 사실에 근거했으므로, 원인 가설(TCC)이 기각되어도 유효하다.
-20. **파괴적 작업을 하는 스크립트는 절대 조용히 죽어서는 안 된다.** 설치·정리처럼 부분
-    실행이 곧 손상인 작업에는 EXIT trap 으로 중단 사실과 복구 경로를 남긴다.
-    (`set -e` 하에서 명령치환 할당이 실패하면 셸이 침묵 종료한다.)
-21. **정리 작업이 권한 확대가 되지 않게 하라.** 권한이 틀려 무시돼 온 설정 파일을
-    "고치는" 것은 한 번도 부여된 적 없는 권한을 새로 여는 일이다. 감사는 하되 자동
-    교정하지 말고, 무엇을 원하는지 사람이 결정하게 하라.
+17. **For work that needs privilege, delegate to a system daemon that has it rather
+    than doing it yourself.** `diskutil` (-> `diskarbitrationd`) is more reliable
+    than `umount` (a direct syscall) because it depends less on the caller's
+    execution context.
+18. **Do not delete a fallback; reorder it.** The correct remedy for "stage 1 always
+    fails" is demotion, not deletion. Deleting it leaves no alternative when the
+    remaining stage fails; demoting it removes only the noise. As a side effect,
+    **that message reappearing becomes an anomaly signal** in itself.
+19. **A refuted hypothesis does not necessarily invalidate the decisions built on
+    it.** Distinguish whether the decision's basis was "an observed fact" or "an
+    explanation of that fact". The reordering rested on the fact that "it always
+    fails from a daemon", so it holds even though the causal hypothesis (TCC) was
+    rejected.
+20. **A script that does destructive work must never die silently.** For work where
+    partial execution is itself damage, such as installation or cleanup, leave the
+    fact of the abort and the recovery path via an EXIT trap.
+    (Under `set -e`, a failed assignment from a command substitution exits the shell
+    silently.)
+21. **Do not let a cleanup become a privilege escalation.** "Fixing" a configuration
+    file that has been ignored because its permissions were wrong means newly opening
+    a privilege that was never granted. Audit, but do not remediate automatically —
+    let a human decide what they want.
 
-### 실험과 관찰
+### Experiment and observation
 
-22. **자기 치유 시스템을 측정할 때는 치유를 먼저 멈춰라.** 고장을 인위적으로 만들어
-    관찰하려는데 시스템이 즉시 고쳐 버리면 측정 대상이 측정 중에 바뀐다. 관찰자 효과의
-    운영판이며 원칙 8 의 역방향이다.
-23. **경보 장치는 정상 경로에서도 검증하라.** 실패를 알리는 장치가 오탐하면 다음번 진짜
-    실패도 무시된다. EXIT trap 을 넣었으면 성공 케이스에서 침묵하는지를 반드시 확인한다.
-24. **재현 실패도 데이터다.** 고장을 인위적으로 만들려다 실패했을 때 "환경이 이상하다"로
-    넘기지 말고 왜 실패했는지 물어라. 하이재킹 재현 실패가 그것이 **경합**이라는 사실을
-    드러냈고, 그것이 간헐성의 설명이 되었다.
-25. **실험 전에 관찰 채널이 그 이벤트를 기록하는지 확인하라.** 감시 데몬은 이상 상태에만
-    로깅하므로 만료·재활용은 자체 로그에 나타나지 않는다 — 이벤트가 5건 발생하는 동안
-    관찰자는 "아무 일도 없다"고 결론냈다. 침묵이 "무사건"인지 "채널 밖"인지 구분하려면
-    이벤트 소스를 봐야 한다. 원칙 6 의 관찰 버전이다.
+22. **When measuring a self-healing system, stop the healing first.** If you induce a
+    failure to observe it and the system fixes it immediately, what you are measuring
+    changes while you measure it. The operational version of the observer effect, and
+    the reverse direction of Principle 8.
+23. **Verify your alarms on the healthy path too.** If the mechanism that announces
+    failure false-positives, the next real failure gets ignored as well. Having added
+    an EXIT trap, always confirm that it stays silent on the success case.
+24. **A failed reproduction is data too.** When an attempt to induce a failure fails,
+    do not write it off as "the environment is odd" — ask why it failed. The failure
+    to reproduce hijacking revealed that it is **a race**, and that became the
+    explanation for its intermittency.
+25. **Before an experiment, confirm that your observation channel records that
+    event.** The watch daemon logs only fault states, so expiry and recycling never
+    appear in its own log — while 5 events occurred, the observer concluded "nothing
+    is happening". Telling "no event" from "outside the channel" means looking at the
+    event source. The observation version of Principle 6.
 
-### 계층 선택
+### Choosing a layer
 
-26. **차단(deny)과 정리(cleanup)는 같은 요구에 대한 다른 계층의 처방이며, 바꿔 쓸 수 없다.**
-    클라이언트가 "실패하면 작업 전체를 중단"하도록 설계한 부수 동작을 서버에서 막으면,
-    그 클라이언트의 주 기능이 죽는다. 원하는 것이 **결과 상태의 청결**이라면 처방은 사후
-    정리다 — 정리는 실패해도 아무것도 깨뜨리지 않지만, 차단은 실패하는 것이 곧 남의
-    기능이다. 요구를 "무엇을 막을까"가 아니라 **"무엇이 남지 않기를 원하는가"**로 다시
-    쓰면 계층이 결정된다.
-27. **클라이언트 측 억제 설정이 그 클라이언트의 모든 경로를 덮는다고 가정하지 마라.**
-    억제가 켜져 있다는 사실을 서버측 방어의 전제로 삼으면, 전제 밖의 경로가 열리는 순간
-    기능이 죽는다. 억제는 유입을 줄이는 보조이지 보장이 아니다 — 원칙 1 의 설정 버전이다.
-28. **정확성을 push 채널에 의존시키지 마라 — push 는 가속이지 보장이 아니다.** 캐시
-    무효화 notify 를 끄자 폴링 치유가 무기한 stale 로 퇴화했다 — push 가 살아 있어야만
-    성립하던 신선함이었다 (층 7). 그리고 그 push 의 실효 전제인 캐시 상태 자체가 침묵
-    전환되는 것도 실측됐다 (층 7 쌍안정). push 유실은 에러가 아니라 **부재**라서 어떤
-    로그에도 남지 않는다. 정확성이 필요한 곳은 pull(재검증) 또는 무캐시로 설계하고,
-    push 는 그 위의 지연 단축으로만 쓴다 — 원칙 27 과 같은 구조가 시간축에서 반복된
-    것이다.
+26. **Blocking (deny) and cleanup are remedies at different layers for the same
+    requirement, and are not interchangeable.** Blocking, at the server, an
+    incidental action that the client was designed to treat as "abort everything on
+    failure" kills that client's primary function. If what you want is **cleanliness
+    of the resulting state**, the remedy is post-hoc cleanup — cleanup breaks nothing
+    when it fails, whereas what fails when blocking fails is someone else's feature.
+    Rewriting the requirement from "what should I block" to **"what do I want not to
+    remain"** decides the layer.
+27. **Do not assume a client-side suppression setting covers every path of that
+    client.** Making the fact that a suppression is on a premise of your server-side
+    defence means the feature dies the moment a path outside that premise opens. A
+    suppression reduces inflow; it is a secondary aid, not a guarantee — the settings
+    version of Principle 1.
+28. **Do not make correctness depend on a push channel — a push is an accelerator,
+    not a guarantee.** Turning off cache invalidation notify degraded polling-based
+    healing into indefinite staleness — it was freshness that only held while the
+    push was alive (Layer 7). And the cache state that is the precondition for that
+    push having any effect was itself measured transitioning silently (Layer 7
+    bistability). A lost push is not an error but an **absence**, so it appears in no
+    log at all. Design what needs correctness as a pull (revalidation) or as no
+    cache, and use a push only to shorten the latency on top of that — the same
+    structure as Principle 27, repeated on the time axis.
 
-### 셸과 로케일
+### Shell and locale
 
-29. **변수 확장 뒤에 비ASCII 문자가 바로 오면 중괄호로 감싸라.** macOS 의 bash 3.2 는
-    UTF-8 로케일에서 뒤따르는 멀티바이트 문자의 첫 바이트를 변수명에 포함시킨다.
-    `set -u` 와 만나면 unbound variable 로 죽고, 없으면 조용히 빈 문자열이 된다.
+29. **Brace a variable expansion when a non-ASCII character follows it immediately.**
+    macOS's bash 3.2 folds the first byte of a following multibyte character into the
+    variable name under a UTF-8 locale. Meeting `set -u` it dies as an unbound
+    variable; without it, it silently becomes an empty string.
 
-    위험한 것은 실패 자체가 아니라 **재현 조건이 환경에 있다는 점**이다. `LC_ALL=C`
-    에서는 재현되지 않으므로, 작성자의 셸과 사용자의 셸이 다르면 검증을 통과한 코드가
-    상대의 터미널에서만 터진다. 이 레포는 모든 스크립트가 한글을 출력하므로 구조적
-    위험이며, 실제로 진단 도구가 판정 직전에 죽어 **측정이 성공하고도 무용해진** 적이 있다.
+    What is dangerous is not the failure itself but **that the conditions for
+    reproducing it live in the environment.** It is not reproducible under `LC_ALL=C`,
+    so when the author's shell differs from the user's, code that passed verification
+    blows up only on the other person's terminal.
 
-    회귀 검사는 한 줄이다:
+    Until this repository switched to English, every script printed Korean, which
+    made it a structural risk — and a diagnostic tool did die right before its
+    verdict, making a successful measurement useless. English output removes the
+    trigger at the source here, but the principle still applies to anyone printing
+    non-ASCII, and the braces are kept.
+
+    The regression check is one line:
 
     ```bash
     perl -ne 'while (/\$([A-Za-z_]\w*)(?=[\x80-\xFF])/g){print "$ARGV:$.\n"}' $(git ls-files)

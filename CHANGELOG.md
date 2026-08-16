@@ -71,6 +71,33 @@ changing its meaning, and moving a deployment path, are major changes.
   not a guarantee) registered.
   The measurement ledger is `docs/history/layer7-cache-coherency.md`
 
+### Changed
+
+- **The project language is now English** — code comments, user-facing output (log
+  lines, errors, help text), documentation, commit messages and pull requests. This
+  repository is published so that people running the same setup do not have to
+  rediscover these failures, but its inbound traffic is essentially all search, and
+  a Korean surface reached none of it. Machine translation does not solve this: what
+  is never found never gets translated either.
+  `docs/history/` stays in Korean. It is the session handoff ledger — raw
+  measurement logs and reasoning as it happened — roughly half of all documentation
+  by volume, lowest in external value, and where a translation would most easily
+  degrade the one thing that makes it worth keeping: which hypothesis was refuted by
+  which measurement. Its findings are already distilled into the failure model and
+  the decision log. `docs/history/README.md` states this in place.
+  Git history is not rewritten (the repository is already public and the PR numbers
+  in those subjects would stop matching their GitHub pages), so this file is the
+  English-language record.
+  A side effect: **Principle 29's trigger is removed at the source.** It existed
+  because a variable expansion followed by Korean made macOS bash 3.2 fold the
+  multibyte character's first byte into the variable name, killing the collision
+  probe right before its verdict. The braces and the regression check are kept, since
+  the principle still applies to anyone printing non-ASCII, and its wording is now
+  past tense.
+  Log strings changed with everything else, so `./install.sh` has to be re-run for
+  the deployed copies to carry the new messages — until then `tools/doctor.sh` will
+  correctly report drift against the repo.
+
 ### Fixed
 
 - **Corrected the interpretation of the Layer 7 bistability: what differs is not

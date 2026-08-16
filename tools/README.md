@@ -50,8 +50,9 @@ in [install.md](../docs/install.md).
 
 ## `probe-rename-collision.sh` (active)
 
-Determination and regression check for Layer 6, share root name collision
-([failure-model.md](../docs/failure-model.md)). It fetches the share root's entry
+Determination and regression check for
+[Layer 6, share root name collision](../docs/failure-model.md#layer-6--share-root-name-collision).
+It fetches the share root's entry
 names from the guest and actually attempts an overwriting rename with each of them
 on the mount. **The names that fail are exactly the contaminated basename set** —
 existing files with those names cannot be overwritten or deleted anywhere in the
@@ -85,9 +86,9 @@ defect** — a case this tool demonstrated on itself.
 
 ## `probe-layer4b.sh`
 
-A one-off tool for narrowing down the cause of Layer 4b, where `umount -f`
-returned EPERM only in a daemon context
-([failure-model.md](../docs/failure-model.md)). It stops the watch daemon, creates
+A one-off tool for narrowing down the cause of
+[Layer 4b](../docs/failure-model.md#layer-4b--umount-refused-in-a-daemon-context-cause-undetermined),
+where `umount -f` returned EPERM only in a daemon context. It stops the watch daemon, creates
 an ownership fault artificially, and then attempts an unmount in two rounds
 (delayed, then immediate).
 
