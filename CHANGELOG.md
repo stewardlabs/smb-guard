@@ -1,149 +1,193 @@
-# 변경 이력
+# Changelog
 
-형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/), 버전은
-[유의적 버전](https://semver.org/lang/ko/)을 따른다.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+versioning follows [Semantic Versioning](https://semver.org/).
 
-이 프로젝트에서 **호환성의 단위는 설정 파일**(`smb-guard.conf`)과 배치 경로다. 설정 키를
-제거하거나 의미를 바꾸는 변경, 배치 경로를 옮기는 변경이 major 다.
+In this project **the unit of compatibility is the configuration file**
+(`smb-guard.conf`) and the deployment paths. Removing a configuration key or
+changing its meaning, and moving a deployment path, are major changes.
 
-## [미출시]
+## [Unreleased]
 
-### 추가
+### Added
 
-- **공유 루트를 워크스페이스 상위에 둘 수 있게 한다** (`SMBG_EXPORT_ROOT`,
-  `SMBG_SHARE_SUBPATH`) — Samba 가 파일 삭제 시 스트림을 지우며 basename 을 공유 루트
-  기준으로 해석하는 결함 때문에, **공유 루트의 엔트리명과 같은 basename 을 가진 기존
-  파일을 트리 어디에서도 덮어쓰거나 지울 수 없었다.** `.git/config` 가 여기 걸려
-  `git init` 이 36바이트에서 멈추고 `.git/config` 손상이 누적됐다.
-  공유 루트를 한 단계 올리면 충돌 집합이 워크스페이스명 하나로 줄고, 클라이언트는 공유의
-  하위 디렉터리를 마운트하므로 보이는 레이아웃은 그대로다.
-  고장 모델에 **층 6**으로 등재했다 (계측 근거 포함)
-- `tools/probe-rename-collision.sh` — 층 6 의 판별·회귀 확인 도구. 공유 루트의 엔트리
-  이름으로 덮어쓰기 rename 을 실제로 시도해 **오염된 basename 집합**을 뽑는다.
-  회수는 게스트에서 한다(맥에서 `rm -rf` 하면 정리 자체가 같은 결함에 걸린다)
-- **전제 조건 두 가지를 명문화한다: 게스트 통합 도구 미설치, 게스트 고정 IP.**
-  `--time-sync off` 는 설정이라 자동 업데이트·재설치·구성 복원으로 되돌아갈 수 있고
-  되돌아간 상태는 로그가 없어 다음 스큐까지 드러나지 않는다 — 끄는 것은 증상을 막고
-  설치하지 않는 것은 원인을 없앤다. 헤드리스 개발 게스트에서 도구의 나머지 기능
-  (클립보드·디스플레이·공유 폴더·호스트 hosts 자동 등록)은 불필요하거나 이 설계가
-  반대 방향으로 쓰므로 비용이 0 이다. 도구를 빼면 호스트 `/etc/hosts` 항목의 유지
-  주체가 사라지므로 **고정 IP + 정적 hosts 항목이 짝**이며, mDNS 대체는 수면 복귀
-  직후 재광고 지연 때문에 권하지 않는다. 층 1 에 '더 강한 처방'·'게스트는 고정 IP 로
-  둔다' 절 추가, 결정 기록에 **'게스트 통합 도구를 설치하지 않는다'** 등재
-- `tools/doctor.sh` — 호스트(macOS) 구성 생존 점검 (읽기 전용). macOS 메이저
-  업그레이드가 install 비관리 영역인 autofs 3종을 기본값으로 되돌리거나, BTM 승인
-  리셋으로 LaunchDaemon 을 **"파일은 있는데 로드 안 됨"** 으로 만들 수 있어, 파일
-  존재가 아니라 실제 로드 상태·내용·소유·권한·레포 대비 드리프트로 판정한다.
-  자동 교정하지 않고 항목별 처방만 안내한다(원칙 21). 종료 코드 0/1/2 로
-  정상·이상·판정 불완전(root 필요 항목 스킵)을 구분한다(원칙 25).
-  결정 기록에 **'점검을 설치와 분리한다'** 등재 — 재설치로 낫지 않는 고장(install
-  관할 밖인 autofs 3종의 원복)이 있다는 것이 분리의 근거다. README·install·operations
-  에 진입점을 두어 설치 직후와 OS 업그레이드 직후 모두 이 도구부터 돌리게 했다
-- 잔재 정리(`mac-cruft-cleanup`)가 **공유 루트를 깊이 1 로 한 번 더 훑는다** — Finder 는
-  잔재를 마운트된 공유의 루트에 만들므로, 공유 루트를 올리면 워크스페이스 순회만으로는
-  닿지 않는다. systemd 유닛의 `ReadWritePaths` 에 공유 루트를 추가하는 것이 짝이다
-  (`ProtectSystem=strict` 아래에서는 없는 경로의 삭제가 조용히 실패한다)
+- **The share root can now sit above the workspace** (`SMBG_EXPORT_ROOT`,
+  `SMBG_SHARE_SUBPATH`) — because of a Samba defect where deleting a file clears
+  streams and resolves the basename relative to the share root, **an existing file
+  whose basename matched an entry name at the share root could not be overwritten
+  or deleted anywhere in the tree.** `.git/config` was caught by this, `git init`
+  stopped at 36 bytes and damage to `.git/config` accumulated.
+  Raising the share root one level shrinks the collision set to the single
+  workspace name, and since the client mounts a subdirectory of the share the
+  visible layout is unchanged.
+  Registered in the failure model as **Layer 6** (with measurements)
+- `tools/probe-rename-collision.sh` — determination and regression check for
+  Layer 6. It actually attempts an overwriting rename with each entry name of the
+  share root and extracts the **contaminated basename set**.
+  Reclamation happens on the guest (an `rm -rf` from the Mac would catch the
+  cleanup itself in the same defect)
+- **Two prerequisites made explicit: the guest integration tools are not installed,
+  and the guest has a static IP.** `--time-sync off` is a setting, so an
+  auto-update, a reinstall or a configuration restore can revert it, and a reverted
+  state leaves no log and stays hidden until the next skew — turning it off stops
+  the symptom, not installing it removes the cause. On a headless development guest
+  everything else the tools provide (clipboard, display, shared folders, automatic
+  host hosts registration) is either unnecessary or used in the opposite direction
+  by this design, so the cost is zero. Removing the tools leaves nothing to
+  maintain the host's `/etc/hosts` entry, so **a static IP and a static hosts entry
+  are a pair**, and replacing them with mDNS is not recommended because
+  re-advertisement lags right after waking. Added the 'The stronger remedy' and
+  'Give the guest a static IP' sections to Layer 1, and registered **'Do not
+  install the guest integration tools'** in the decision log
+- `tools/doctor.sh` — survival check of the host (macOS) configuration
+  (read-only). A macOS major upgrade can revert the autofs trio, which the
+  installer does not manage, to defaults, or a BTM approval reset can leave a
+  LaunchDaemon **"file present but not loaded"**, so the verdict comes from the
+  actual load state, contents, ownership, permissions and drift against the repo
+  rather than from file existence.
+  It never remediates automatically and only prints the per-item remedy
+  (Principle 21). Exit codes 0/1/2 distinguish healthy, faulty and
+  verdict-incomplete (root-only items skipped) (Principle 25).
+  Registered **'Separate inspection from installation'** in the decision log — the
+  basis for the separation is that there are faults a reinstall does not fix
+  (reversion of the autofs trio, which is outside the installer's remit). Entry
+  points were placed in README, install and operations so that this tool is run
+  first both right after installation and right after an OS upgrade
+- The cruft cleanup (`mac-cruft-cleanup`) now **sweeps the share root once more at
+  depth 1** — the Finder creates cruft at the root of the mounted share, so once
+  the share root is raised a workspace-only sweep no longer reaches it. Adding the
+  share root to the systemd unit's `ReadWritePaths` is the matching half (under
+  `ProtectSystem=strict`, deletion in a path not listed there fails silently)
 
-- **고장 모델에 층 7 등재: 서버 로컬 쓰기는 클라이언트 캐시에 비가시적이다** —
-  게스트가 쓰고 맥이 읽는 조합에서 캐시된 내용이 무기한 stale 이 된다(단발 읽기
-  T=120s stale, held-fd ≥180s, 부분 읽기 ≥900s 실측). lease 는 깨지지 않고
-  (`smbstatus` 실측) 치유는 change notify push 뿐인데 그 채널이 침묵 웨지되는
-  쌍안정을 관측했다. 처방으로 autofs 맵에 `nodatacache` 를 추가했다(4개 작업 부하
-  실측 비용 0). 서버측 `kernel oplocks` 는 SMB2/3 클라이언트에 빈 lease 를 주는
-  캐싱 몰수로 판명되어 기각. **설계 원칙 28**(push 는 가속이지 보장이 아니다) 등재.
-  실측 원장은 `docs/history/layer7-cache-coherency.md`
+- **Layer 7 registered in the failure model: server-local writes are invisible to
+  the client cache** — in the combination where the guest writes and the Mac reads,
+  cached content goes stale indefinitely (measured: one-shot read stale at T=120s,
+  held-fd >=180s, partial read >=900s). The lease is never broken (measured with
+  `smbstatus`) and the only healing is a change notify push, whose channel was
+  observed wedging silently in a bistable manner. The remedy added `nodatacache` to
+  the autofs map (measured cost zero across 4 workloads). Server-side
+  `kernel oplocks` was rejected, having proved to be a caching confiscation that
+  hands SMB2/3 clients an empty lease. **Principle 28** (a push is an accelerator,
+  not a guarantee) registered.
+  The measurement ledger is `docs/history/layer7-cache-coherency.md`
 
-### 수정
+### Fixed
 
-- **층 7 쌍안정의 해석 정정: 갈리는 것은 notify 전달이 아니라 클라이언트 데이터
-  캐시 사용 자체다** — nodatacache 적용 검증 중, 기본 옵션 마운트도 held-fd
-  64KB 재읽기 1000회 전량(64MB)을 재전송하는 것을 실측했다(서버 tx_bytes 대조).
-  "notify push 가 40ms 에 치유"로 해석했던 비활성 상태의 신선함은 "애초에 캐시에서
-  읽지 않는다"로 정정. 비용 실측 0 결론에 단서 추가(기본측이 캐시 비활성 상태의
-  대조였음), 캐시 상태 판별 트래픽 프로브를 채집 절차에 추가
+- **Corrected the interpretation of the Layer 7 bistability: what differs is not
+  notify delivery but whether the client data cache is used at all** — while
+  verifying the nodatacache change, a default-options mount was also measured
+  retransmitting all 1000 held-fd 64KB re-reads (64MB) (compared against the
+  server's tx_bytes). The freshness of the inactive state, previously interpreted
+  as "notify push heals it in 40ms", was corrected to "it never reads from the
+  cache in the first place". A caveat was added to the measured-cost-zero
+  conclusion (the baseline side was a comparison in the cache-inactive state), and
+  a traffic probe for determining the cache state was added to the collection
+  procedure
 
-- 프로브가 **UTF-8 로케일에서 판정 직전에 죽던 문제.** 변수 뒤에 한글이 중괄호 없이
-  붙어 있어 macOS 의 bash 3.2 가 멀티바이트 첫 바이트를 변수명에 포함시켰다. 측정은
-  끝난 뒤라 `FAIL` 목록은 나왔지만 요약과 판정문이 사라졌다 — 진단 도구가 판정 직전에
-  죽으면 측정이 성공해도 무용하다. `LC_ALL=C` 에서는 재현되지 않아 작성자 셸에서만
-  통과했다. **설계 원칙 29** 로 등재
-- 프로브가 **정상 상태에서 exit 1 을 내던 문제.** 공유 루트를 상향한 배치에서는
-  워크스페이스 자신의 이름이 반드시 남는데 그것을 오염으로 보고했다. 기대된 잔여를
-  구분해 정상은 exit 0, 그 밖의 오염만 exit 1 로 낸다 (설계 원칙 23)
+- **The probe died right before its verdict under a UTF-8 locale.** A variable was
+  followed by Korean text without braces, so macOS's bash 3.2 folded the first byte
+  of the multibyte character into the variable name. The measurement was already
+  finished, so the `FAIL` list appeared but the summary and the verdict were lost —
+  when a diagnostic tool dies right before its verdict, a successful measurement is
+  useless. It was not reproducible under `LC_ALL=C`, so it passed in the author's
+  shell. Registered as **Principle 29**
+- **The probe returned exit 1 in a healthy state.** In a layout with the share root
+  raised, the workspace's own name necessarily remains, and that was being reported
+  as contamination. The expected residue is now distinguished, so healthy exits 0
+  and only other contamination exits 1 (Principle 23)
 
-### 문서
+### Documentation
 
-- 층 6 의 **상류 정체를 확정**했다. 우리 환경 고유 문제가 아니라 Samba 의 회귀이며
-  (`09f49fb56a4` 가 도입, `2fc21d87` 이 master 에서 수정, 상류 버그 16144), 릴리스
-  브랜치에는 아직 백포트되지 않았다. 미확인 항목은 "고쳐졌는지"에서 "백포트 시점"으로
-  좁혔다
+- **Settled the upstream identity of Layer 6.** It is not specific to our
+  environment but a Samba regression (introduced by `09f49fb56a4`, fixed on master
+  by `2fc21d87`, upstream bug 16144), not yet backported to the release branches.
+  The open item narrowed from "has it been fixed" to "when will it be backported"
 
-### 호환성
+### Compatibility
 
-두 설정 키 모두 **선택**이며 미설정 시 기존 동작으로 폴백한다
-(`SMBG_EXPORT_ROOT` → `SMBG_GUEST_ROOT`, `SMBG_SHARE_SUBPATH` → 없음).
-`mac-cruft-cleanup` 의 2번째 인자도 선택이고, 1번째와 같으면 얕은 스윕을 건너뛴다.
-따라서 1.0.0 설정 파일을 그대로 쓸 수 있다 — minor 변경이다.
+Both configuration keys are **optional** and fall back to the previous behaviour
+when unset (`SMBG_EXPORT_ROOT` -> `SMBG_GUEST_ROOT`, `SMBG_SHARE_SUBPATH` -> none).
+The second argument of `mac-cruft-cleanup` is optional too, and the shallow sweep
+is skipped when it equals the first.
+A 1.0.0 configuration file therefore still works — this is a minor change.
 
 ---
 
 ## [1.0.0] — 2026-08-15
 
-첫 공개 릴리스. 공개 이전에 macOS 26 + Parallels + Ubuntu 26.04 환경에서 실전 운영·검증을
-마친 상태를 기준으로 한다 (계보는 아래 참조).
+First public release. It is based on the state after real operation and
+verification on macOS 26 + Parallels + Ubuntu 26.04 prior to publication (see the
+lineage below).
 
-### 추가
+### Added
 
-- 마운트 소유권 감시·교정 (`smb-guard`) — 마운트 이벤트 훅으로 즉시 발화, 4모드
-  (`watch`/`--ensure`/`--remount`/`--state`)
-- 수면·웨이크 훅 (`smb-guard-sleep`, `smb-guard-wakeup`) — 스퓨리어스 웨이크 게이트,
-  네트워크 대기, 시계 교정, 마운트 보장, 생존성 프로브
-- 수동 복구 도구 (`smbfix`)
-- 게스트 시계 step (`clockfix`) — 소수점 epoch, NTP 소스 즉시 복귀
-- 게스트 잔재 정리 (`mac-cruft-cleanup` + systemd 타이머) — 서버측 차단의 대체물
-- 설정 외부화 (`smb-guard.conf`) 와 배치 시점 템플릿 치환
-- 호스트·게스트 통합 install 오케스트레이터 (`--host`/`--guest`/`--dry-run`/`--samba`)
-- 문서: 6층 고장 모델, 설계 원칙 27개, 결정 기록, 운영·진단 가이드
+- Mount ownership watch and remediation (`smb-guard`) — fires immediately via the
+  mount event hook, 4 modes (`watch`/`--ensure`/`--remount`/`--state`)
+- Sleep and wake hooks (`smb-guard-sleep`, `smb-guard-wakeup`) — spurious-wake
+  gate, network wait, clock correction, mount assurance, liveness probe
+- Manual recovery tool (`smbfix`)
+- Guest clock step (`clockfix`) — fractional epoch, immediate return of NTP sources
+- Guest cruft cleanup (`mac-cruft-cleanup` + a systemd timer) — the replacement for
+  server-side blocking
+- Configuration externalisation (`smb-guard.conf`) and template substitution at
+  deployment time
+- Unified host/guest install orchestrator
+  (`--host`/`--guest`/`--dry-run`/`--samba`)
+- Documentation: the 6-layer failure model, 27 design principles, the decision log,
+  operations and diagnostics guides
 
-### 공개를 위한 변경
+### Changes made for the public release
 
-- **설정 외부화** — 계정·마운트 지점·게스트 별칭·공유명·Label 접두사가 코드에서 분리됐다
-- **`host/` · `guest/` 구조 분리** — 이전에는 호스트용과 게스트용 파일이 한 디렉터리에
-  섞여 있었다
-- **하드코딩된 IP 폴백 제거** — `/etc/hosts` 조회 실패 시 호스트명을 그대로 쓴다
-- **`/etc/hosts` 파싱 수정** — 두 번째 필드만 보던 것을 전 필드 스캔으로. 정식 이름 뒤에
-  별칭이 오는 형식(`10.0.0.4  host.domain  host`)에서 매칭에 실패하고 있었다
-- **원격 진단 경로 수정** — 게스트에 보내는 `find` 가 호스트 마운트 경로를 쓰고 있었다.
-  게스트 경로(`SMBG_GUEST_ROOT`)를 쓴다
-- **SMB 인증 계정 분리** (`SMBG_SMB_USER`) — 로컬 소유자 계정과 다를 수 있다
-- **계정 조회 폴백 제거** — UID 조회 실패 시 기본값으로 넘어가지 않고 실패한다. 폴백은
-  무관한 사용자의 자격으로 마운트를 건드리게 만든다
-- **웨이크 사용자 훅 일반화** (`SMBG_WAKE_USER_HOOK`) — 특정 앱 경로가 박혀 있던 것을
-  선택적 훅으로
+- **Configuration externalisation** — the account, mount point, guest alias, share
+  name and Label prefix were separated out of the code
+- **`host/` and `guest/` structural split** — previously the host and guest files
+  were mixed in one directory
+- **Removed the hardcoded IP fallback** — when the `/etc/hosts` lookup fails, the
+  hostname is used as-is
+- **Fixed `/etc/hosts` parsing** — from looking only at the second field to scanning
+  every field. It was failing to match the form where aliases follow the canonical
+  name (`10.0.0.4  host.domain  host`)
+- **Fixed the remote diagnostic path** — the `find` sent to the guest was using the
+  host mount path. It now uses the guest path (`SMBG_GUEST_ROOT`)
+- **Separated the SMB authentication account** (`SMBG_SMB_USER`) — it may differ
+  from the local owner account
+- **Removed the account lookup fallback** — a failed UID lookup now fails instead of
+  falling through to a default. A fallback would touch the mount under an unrelated
+  user's credentials
+- **Generalised the wake user hook** (`SMBG_WAKE_USER_HOOK`) — from a hardcoded
+  application path to an optional hook
 
 ---
 
-## 공개 이전 계보
+## Pre-release lineage
 
-공개 전 개발은 핸드오프 문서로 이어졌다. 전문은 [docs/history/](docs/history/) 에 있다.
+Development before publication was carried forward through handoff documents. The
+full text is in [docs/history/](docs/history/).
 
-| 계보 | 요지 |
+| Lineage | Summary |
 |---|---|
-| v13 | 고장 모델(층 0~4) 규명, 만료 창 제거, 마운트 이벤트 훅 도입. 운영 개시 |
-| v14 계열 | 배치를 system 도메인으로 통일. 로그 통합·회전, 공용 라이브러리 분리. **v13 로직의 버그 2건 수정** (잠금 거짓 성공, 유령 잠금) |
-| v15 | 전 검증 항목 통과, 확정. 웨이크 성능 15초 → **4초** |
-| v16 | 시계 계층 재구성. 하이퍼바이저 동기화가 게스트 NTP 를 죽이던 것을 규명·제거. `clockfix` 소수점 epoch |
-| v17 | Finder 복사 차단(`-8062`) 해소. 서버측 차단 폐지 → 사후 정리로 이관 |
+| v13 | Clarified the failure model (Layers 0-4), removed the expiry window, introduced the mount event hook. Went into operation |
+| v14 series | Unified deployment into the system domain. Unified and rotated the logs, split out the shared library. **Fixed 2 bugs in the v13 logic** (false lock success, ghost lock) |
+| v15 | All verification items passed, settled. Wake performance 15s -> **4s** |
+| v16 | Restructured the clock layers. Clarified and removed the hypervisor synchronisation that was killing guest NTP. Fractional epoch for `clockfix` |
+| v17 | Resolved the Finder copy blockage (`-8062`). Abolished server-side blocking, moved to post-hoc cleanup |
 
-v14 계열에서 수정된 버그와 기각된 가설:
+Bugs fixed and hypotheses rejected in the v14 series:
 
-- **잠금 실패 시 거짓 성공** — `--ensure` 가 잠금을 못 얻으면 아무것도 하지 않고 성공을
-  반환했다. 호출자는 마운트가 보장됐다고 믿고 다음 단계로 넘어갔다
-- **유령 잠금** — `SIGKILL` 로 죽으면 잠금이 영구히 남고 그때부터 전체가 침묵했다.
-  로그에도 아무것도 남지 않는 무증상 고장
-- **plist 텍스트 파싱** — `grep` 패턴이 Label 값에 매칭되어 정상 설치인데도 중단됐다
-- **`set -e` 침묵 종료** — 명령치환 할당이 실패하면 셸이 말없이 죽어 부분 삭제 상태를 남겼다
-- **EXIT trap 오탐** — 마지막 문장의 AND 리스트 반환값이 종료 코드가 되어 정상 완료를
-  오류로 보고했다. 경보 장치가 오탐하면 다음번 진짜 실패도 무시된다
-- **기각된 가설 6건** — 언마운트 EPERM 관련 5건(TCC/FDA · 마운트 소유자 · 수면 전환 커널
-  차단 · 저수준 특성 · 타이밍) + darkwake 세션 단절
+- **False success on lock failure** — when `--ensure` could not take the lock it did
+  nothing and returned success. The caller believed the mount was assured and moved
+  on to the next stage
+- **Ghost lock** — a `SIGKILL` left the lock behind forever, and from then on
+  everything went silent. An asymptomatic failure that left nothing in the log
+  either
+- **Text parsing of a plist** — a `grep` pattern matched the Label value and aborted
+  a perfectly good installation
+- **Silent exit under `set -e`** — a failed assignment from a command substitution
+  killed the shell without a word, leaving a partially deleted state
+- **EXIT trap false positive** — the return value of an AND list in the last
+  statement became the exit code and reported a normal completion as an error. When
+  the mechanism that announces failure false-positives, the next real failure gets
+  ignored too
+- **6 rejected hypotheses** — 5 about the unmount EPERM (TCC/FDA, the mount's owner,
+  kernel blocking during the sleep transition, low-level characteristics, timing) +
+  darkwake session disconnection

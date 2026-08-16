@@ -1,81 +1,88 @@
 #===============================================================================
-# /etc/samba/smb.conf — 워크스페이스 공유 (템플릿)
+# /etc/samba/smb.conf — workspace share (template)
 #
-# install.sh 가 설정값으로 치환한다. **기본적으로 자동 배치하지 않는다** —
-# 기존 smb.conf 를 통째로 덮으면 이 공유와 무관한 설정이 사라지기 때문이다.
-# `guest/install.sh --samba` 를 명시해야 배치되며 그때도 기존 파일을 백업한다.
-# 그 외에는 치환 결과를 출력하므로 필요한 부분만 병합하면 된다.
+# install.sh substitutes the configuration values. **It is not deployed
+# automatically by default** — overwriting an existing smb.conf wholesale would
+# lose settings unrelated to this share. Deployment requires an explicit
+# `guest/install.sh --samba`, and even then the existing file is backed up.
+# Otherwise the substituted result is printed so you can merge just what you need.
 #
-# 핸드오프 v17 §8 결정에 따른 개정. v16 대비 변경 3건:
+# Revised per the §8 decisions of handoff v17. Three changes against v16:
 #
-#   1) veto files / delete veto files  ......  폐지
-#      macOS Finder 의 CopyEngine 은 .DS_Store 쓰기 실패를 "복사 작업 전체의
-#      치명적 오류"로 취급한다 → Finder 오류 코드 -8062 로 복사 전량 실패.
-#      .Trashes 차단도 "휴지통으로 이동"을 깨뜨리는 잠복 버그였다.
-#      차단(deny)은 이 계층의 처방이 아니다 — 원하는 것은 "결과 상태의 청결"이고,
-#      그것의 처방은 사후 정리다 (§9 원칙 26).
-#      → mac-cruft-cleanup.timer(사후 정리) + git ignore(이력 오염 차단) 가
-#        같은 요구를 Finder 를 깨뜨리지 않고 만족시킨다.
+#   1) veto files / delete veto files  ......  abolished
+#      The macOS Finder's CopyEngine treats a failed .DS_Store write as "a fatal
+#      error for the entire copy operation" -> the whole copy fails with Finder
+#      error code -8062.
+#      Blocking .Trashes was also a latent bug that broke "Move to Trash".
+#      Blocking (deny) is not this layer's remedy — what is wanted is "cleanliness
+#      of the resulting state", and the remedy for that is post-hoc cleanup
+#      (§9, Principle 26).
+#      -> mac-cruft-cleanup.timer (post-hoc cleanup) + git ignore (blocking history
+#         pollution) satisfy the same requirement without breaking the Finder.
 #
-#   2) fruit:resource = file  ..............  명시
-#      기본값이지만 의도를 파일에 남긴다. streams_xattr 로 보내면(=stream)
-#      ext4 의 xattr 크기 한계(inode 여유 + 1블록, 통상 4KB)를 그대로 물려받아
-#      큰 리소스 포크에서 쓰기가 실패한다 — 지금 고치는 -8062 와 같은 형태다.
+#   2) fruit:resource = file  ..............  made explicit
+#      It is the default, but the intent is recorded in the file. Sending it via
+#      streams_xattr (=stream) would inherit ext4's xattr size limit (inode slack
+#      plus one block, typically 4KB) and make writes fail for large resource
+#      forks — the same shape as the -8062 being fixed here.
 #
-#   3) 근거 주석  ..........................  추가
-#      근거가 소멸하면 정책도 재검토 대상이다 (§9 원칙 5).
+#   3) rationale comments  .................  added
+#      When the rationale is gone, the policy is up for review too (§9, Principle 5).
 #
-# v18 변경 1건:
+# One v18 change:
 #
-#   4) path = @EXPORT_ROOT@  ...............  공유 루트를 워크스페이스 상위로
-#      Samba 4.23.6 은 파일 삭제 시 delete_all_streams() 로 대체 데이터 스트림을
-#      지우는데, 그 경로가 전체 상대경로가 아니라 **basename 만** 써서 공유 루트
-#      기준으로 해석한다. 공유 루트에 같은 이름이 있으면 엉뚱한 객체를 열어
-#      실패하고, 그 실패가 클라이언트에는 ENOENT 로 올라온다.
-#      → **공유 루트의 엔트리명과 같은 basename 을 가진 기존 파일은 트리 어디에서도
-#        덮어쓰거나 지울 수 없다.** `.git/config` 가 여기 걸려 git 이 깨진다.
-#      공유 루트를 워크스페이스 한 단계 위로 두어 충돌 집합을 비운다. 클라이언트는
-#      공유의 하위 디렉터리를 마운트하므로 보이는 레이아웃은 달라지지 않는다.
-#      상세와 계측 근거는 docs/failure-model.md.
+#   4) path = @EXPORT_ROOT@  ...............  share root moved above the workspace
+#      When deleting a file, Samba 4.23.6 clears alternate data streams via
+#      delete_all_streams(), and that path uses **only the basename** rather than
+#      the full relative path, resolving it against the share root. If a name of
+#      the same basename exists at the share root, it opens the wrong object and
+#      fails, and that failure surfaces to the client as ENOENT.
+#      -> **An existing file whose basename matches an entry name at the share root
+#         cannot be overwritten or deleted anywhere in the tree.** `.git/config`
+#         gets caught by this and git breaks.
+#      Putting the share root one level above the workspace empties the collision
+#      set. The client mounts a subdirectory of the share, so the layout it sees is
+#      unchanged. Details and measurements in docs/failure-model.md.
 #
-# 운영 계약: 잔재가 다시 문제가 되면 **정리 쪽을 손본다.** veto 복원은 -8062 의
-#            재도입이다.
-#            공유 루트에는 워크스페이스 외의 것을 두지 않는다 — 여기 생기는 이름은
-#            그대로 "트리 전역에서 치환 불가한 basename" 이 된다.
+# Operational contract: if cruft becomes a problem again, **fix the cleanup side.**
+#            Restoring veto is a reintroduction of -8062.
+#            Put nothing but the workspace at the share root — any name that
+#            appears there becomes an "irreplaceable basename across the whole
+#            tree".
 #
-# 적용:  testparm -s            (구문 검사, 오류 0건)
-#        systemctl restart smbd
-#        testparm -s 2>/dev/null | grep -E '^\s*veto files'   → 0줄이어야 한다
+# To apply:  testparm -s            (syntax check, 0 errors)
+#            systemctl restart smbd
+#            testparm -s 2>/dev/null | grep -E '^\s*veto files'   -> must be 0 lines
 #
-#        주의: grep -i veto 로 검사하지 말 것. fruit:veto_appledouble = no 가
-#        이름 때문에 잡히는데, 그 줄은 차단이 아니라 차단 해제이며 반드시
-#        남아 있어야 한다 (아래 주석 참조).
+#            Caution: do not check with grep -i veto. It would match
+#            fruit:veto_appledouble = no because of the name, but that line is not
+#            a block — it lifts one, and it must stay (see the comment below).
 #===============================================================================
 
 [global]
-#--- 프로토콜 · macOS 상호운용 --------------------------------------------------
+#--- Protocol and macOS interoperability ---------------------------------------
    server min protocol = SMB3
    ea support = yes
    spotlight = no
 
-#--- 프린터 비활성 (공유 대상 아님) ----------------------------------------------
+#--- Printers disabled (not a share target) ------------------------------------
    load printers = no
    printing = bsd
    printcap name = /dev/null
 
-#--- 서버 정체성 ---------------------------------------------------------------
+#--- Server identity -----------------------------------------------------------
    workgroup = WORKGROUP
    disable netbios = yes
    server string = %h server (Samba, Ubuntu)
    server role = standalone server
 
-#--- 로깅 ----------------------------------------------------------------------
+#--- Logging -------------------------------------------------------------------
    log file = /var/log/samba/log.%m
    max log size = 1000
    logging = file
    panic action = /usr/share/samba/panic-action %d
 
-#--- 인증 ----------------------------------------------------------------------
+#--- Authentication ------------------------------------------------------------
    obey pam restrictions = yes
    unix password sync = yes
    passwd program = /usr/bin/passwd %u
@@ -87,56 +94,60 @@
 
 
 [@SHARE@]
-# 워크스페이스 자신이 아니라 그 상위다 (헤더 v18 항목). 클라이언트는
-# `//<계정>@<호스트>/@SHARE@/<워크스페이스명>` 으로 하위 디렉터리를 마운트한다.
+# This is the level above the workspace, not the workspace itself (header item
+# v18). The client mounts the subdirectory as
+# `//<account>@<host>/@SHARE@/<workspace name>`.
    path = @EXPORT_ROOT@
    valid users = @SMB_USER@
    read only = no
    browseable = yes
 
-#--- 대소문자 -------------------------------------------------------------------
-# git 이 대소문자를 구분하므로 서버도 구분한다.
-# 맥 클라이언트에서의 실효성은 아직 미검증 (핸드오프 §11).
+#--- Case ----------------------------------------------------------------------
+# git is case-sensitive, so the server is too.
+# Its actual effect on Mac clients is still unverified (handoff §11).
    case sensitive = yes
    preserve case = yes
    short preserve case = yes
 
-#--- 권한 -----------------------------------------------------------------------
+#--- Permissions ---------------------------------------------------------------
    create mask = 0644
    directory mask = 0755
 
-# no 면 DOS 속성이 실행 비트로 매핑되어 오염된다.
+# When no, DOS attributes get mapped onto the execute bit and pollute it.
    store dos attributes = yes
 
-#--- macOS 확장 (vfs_fruit) ------------------------------------------------------
+#--- macOS extensions (vfs_fruit) ----------------------------------------------
    vfs objects = catia fruit streams_xattr
    fruit:model = MacSamba
    fruit:posix_rename = yes
    fruit:wipe_intentionally_left_blank_rfork = yes
    fruit:delete_empty_adfiles = yes
 
-# FinderInfo · DOS 속성 → xattr (._* 파일 대신).
-# 수십 바이트라 ext4 xattr 한계와 무관하다.
-# git 은 xattr 을 추적하지 않으므로 여기 쌓이는 것은 이력을 오염시키지 않는다.
+# FinderInfo and DOS attributes -> xattr (instead of ._* files).
+# They are tens of bytes, so ext4's xattr limit is irrelevant.
+# git does not track xattrs, so what accumulates here does not pollute history.
    fruit:metadata = stream
 
-# 리소스 포크는 xattr 로 보내지 않는다 (v17 판단 — 위 헤더 2번 항목).
-# 기본값과 같지만 의도를 명시한다.
+# Resource forks are not sent through xattrs (the v17 judgement — header item 2).
+# Same as the default, but the intent is stated.
    fruit:resource = file
 
-# ._* 를 veto 하지 않는다. 이름에 "veto"가 들어 있으나 veto files 계열이 아니며,
-# no = 차단 해제다. 기본값 yes 는 fruit 이 만든 ._* 에 클라이언트가 접근하지
-# 못하게 하는데, vfs_fruit(8) 매뉴얼이 그 부작용으로 "맥 클라이언트에서 Mac ZIP
-# 아카이브 풀기 실패"를 든다 — .DS_Store -8062 와 같은 고장 구조다.
-# 이 옵션은 fruit:resource = file 일 때만 적용되므로(매뉴얼), 위에서 file 을
-# 명시한 v17 부터 실효를 갖는다. yes 로 되돌리지 말 것.
+# Do not veto ._*. The name contains "veto" but this is not part of the veto files
+# family, and no = lifting the block. The default yes stops clients from reaching
+# the ._* files fruit creates, and the vfs_fruit(8) manual lists "unpacking Mac ZIP
+# archives fails on Mac clients" as a side effect of that — the same failure
+# structure as the .DS_Store -8062.
+# This option only applies when fruit:resource = file (per the manual), so it has
+# had any effect only since v17, where file was made explicit above. Do not set it
+# back to yes.
    fruit:veto_appledouble = no
 
-# Finder 의 chown/chmod 시도로 인한 오작동 방지
+# Prevents misbehaviour from the Finder's chown/chmod attempts
    fruit:nfs_aces = no
 
-#--- veto 없음 (v17) -------------------------------------------------------------
-# 여기에 veto files 를 두지 않는다. 두면 Finder 복사가 -8062 로 전량 실패한다.
-# macOS 잔재(.DS_Store, ._*, .TemporaryItems, .Trashes ...)의 회수는
+#--- No veto (v17) -------------------------------------------------------------
+# Do not put veto files here. With it, every Finder copy fails with -8062.
+# Reclamation of macOS cruft (.DS_Store, ._*, .TemporaryItems, .Trashes ...) is
+# handled by
 #   /usr/local/sbin/mac-cruft-cleanup  +  mac-cruft-cleanup.timer
-# 가 담당한다. 이력 오염은 git 의 ignore 계층이 막는다.
+# History pollution is blocked by git's ignore layers.

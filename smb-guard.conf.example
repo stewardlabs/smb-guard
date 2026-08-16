@@ -1,120 +1,139 @@
-# smb-guard 설정 — 환경 고유 값의 단일 정의처
+# smb-guard configuration — the single definition point for environment-specific values
 #
-# 배치 경로:
-#   호스트(macOS)  /usr/local/etc/smb-guard.conf
-#   게스트(Linux)  /etc/smb-guard.conf
+# Deployment paths:
+#   host (macOS)   /usr/local/etc/smb-guard.conf
+#   guest (Linux)  /etc/smb-guard.conf
 #
-# install.sh 가 이 파일을 양쪽에 복사하고, 그 값으로 LaunchDaemon plist · systemd 유닛 ·
-# newsyslog 설정 · Samba 공유 정의를 생성한다. 값을 바꾸면 install 을 다시 돌린다.
+# install.sh copies this file to both sides and generates the LaunchDaemon plists,
+# the systemd units, the newsyslog configuration and the Samba share definition
+# from its values. Re-run install after changing anything here.
 #
-# **심볼릭 링크로 배포하지 말 것.** 이 체계가 복구하는 대상이 워크스페이스 마운트인데,
-# 설정을 그 마운트 안의 정본에 링크하면 마운트가 끊긴 순간 복구 수단이 함께 사라진다.
-# 반드시 실파일이어야 한다. (호스트 git 설정을 심볼릭이 아닌 실파일로 두는 것과 같은 논리)
+# **Never deploy it as a symlink.** What this system recovers is the workspace
+# mount, so linking the configuration to a canonical copy inside that mount would
+# make the means of recovery vanish the moment the mount goes away. It must be a
+# real file. (The same logic as keeping the host git configuration a real file
+# rather than a symlink.)
 #
-# 셸이 source 하므로 bash 문법을 따른다. 값에 공백이 있으면 따옴표로 감싼다.
+# A shell sources it, so it follows bash syntax. Quote values containing spaces.
 
 #===============================================================================
-# 필수 — 호스트(macOS)
+# Required — host (macOS)
 #===============================================================================
 
-# 워크스페이스를 소유하는 로컬 계정. SMB 인증 계정과 같은 이름일 필요는 없지만,
-# 마운트 소유자 판정(`mounted by <이 값>`)의 기준이 되므로 실제 로그인 계정이어야 한다.
-# 이 계정이 존재하지 않으면 스크립트는 기본값으로 넘어가지 않고 즉시 실패한다.
-SMBG_OWNER="사용자계정"
+# The local account that owns the workspace. It need not have the same name as the
+# SMB authentication account, but it is the basis of mount ownership determination
+# (`mounted by <this value>`), so it must be a real login account.
+# If this account does not exist, the scripts fail immediately rather than falling
+# through to a default.
+SMBG_OWNER="youraccount"
 
-# 호스트에서의 마운트 지점. autofs 직접 맵(/etc/auto_smb)의 키와 일치해야 한다.
-# macOS 에서 /opt 는 firmlink 이므로 synthetic.conf 없이 쓸 수 있다
-# (확인: grep -w opt /usr/share/firmlinks).
+# Mount point on the host. Must match the key of the autofs direct map
+# (/etc/auto_smb). On macOS /opt is a firmlink, so it works without synthetic.conf
+# (check: grep -w opt /usr/share/firmlinks).
 SMBG_MP="/opt/workspace"
 
-# 게스트(파일 서버)의 ~/.ssh/config 별칭. 웨이크 훅이 이 별칭으로 ssh 하여 시계를
-# 교정하므로, **소유자 계정의 ssh 설정에** 등록되어 있어야 한다(훅은 root 로 돌지만
-# `sudo -u <소유자> -H` 로 되돌려 실행한다).
+# The ~/.ssh/config alias of the guest (the file server). The wake hook sshes to
+# this alias to correct the clock, so it must be registered **in the owner
+# account's ssh configuration** (the hook runs as root but switches back with
+# `sudo -u <owner> -H`).
 #
-# 주의: 키에 패스프레이즈가 걸려 있고 ssh-agent 에 의존하면 BatchMode 가 실패한다 —
-# `sudo -u <소유자> -H ssh` 는 SSH_AUTH_SOCK 을 상속하지 않는다. 설치 후 반드시 확인:
-#   sudo -u <소유자> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <이 값> 'date +%s'
+# Caution: if the key has a passphrase and relies on ssh-agent, BatchMode fails —
+# `sudo -u <owner> -H ssh` does not inherit SSH_AUTH_SOCK. Always check after
+# installing:
+#   sudo -u <owner> -H ssh -o BatchMode=yes -o ConnectTimeout=3 <this value> 'date +%s'
 SMBG_HOST="fileserver"
 
-# SMB 공유명. Samba 의 [섹션명] 이자 마운트 URL 의 첫 경로 성분이다.
+# SMB share name. It is both Samba's [section name] and the first path component of
+# the mount URL.
 SMBG_SHARE="workspace"
 
-# 마운트 URL 에서 공유명 뒤에 붙는 경로 (선택, 기본 없음).
+# Path appended after the share name in the mount URL (optional, empty by default).
 #
-# **공유 루트를 워크스페이스보다 한 단계 위에 두는 배치에서 쓴다.** Samba 는 파일 삭제
-# 시 대체 데이터 스트림을 지우며 basename 을 공유 루트 기준으로 해석하는 결함이 있어,
-# 공유 루트에 있는 이름과 같은 basename 을 가진 기존 파일은 트리 어디에서도 덮어쓰거나
-# 지울 수 없다. `.git/config` 가 여기 걸려 git 이 깨진다(docs/failure-model.md).
+# **Used in the layout that puts the share root one level above the workspace.**
+# Samba has a defect where, on file deletion, it clears alternate data streams and
+# resolves the basename relative to the share root, so an existing file whose
+# basename matches a name at the share root cannot be overwritten or deleted
+# anywhere in the tree. `.git/config` gets caught by this and git breaks
+# (docs/failure-model.md).
 #
-# 공유 루트를 올리고 그 하위 디렉터리를 마운트하면 충돌 집합이 비고, 클라이언트에서
-# 보이는 레이아웃은 그대로다. 게스트측 SMBG_EXPORT_ROOT 와 짝을 이룬다.
+# Raising the share root and mounting a subdirectory of it empties the collision
+# set, and the layout the client sees is unchanged. Pairs with the guest-side
+# SMBG_EXPORT_ROOT.
 #   SMBG_SHARE="ws" + SMBG_SHARE_SUBPATH="workspace"
-#     → //계정@호스트/ws/workspace  (공유 루트는 게스트의 /srv/ws)
+#     -> //account@host/ws/workspace  (the share root is the guest's /srv/ws)
 #SMBG_SHARE_SUBPATH="workspace"
 
-# SMB 인증 계정. 로컬 소유자 계정과 다르면 여기에 적는다(미설정 시 SMBG_OWNER 와 같다).
-# 마운트 소유자 판정은 SMBG_OWNER 로, 서버 인증은 이 값으로 한다 — 둘을 섞으면
-# `//계정@호스트/공유` 표기를 소유자 판정에 쓰는 오진이 생긴다.
-#SMBG_SMB_USER="사용자계정"
+# SMB authentication account. Set it here when it differs from the local owner
+# account (defaults to SMBG_OWNER). Mount ownership determination uses SMBG_OWNER
+# and server authentication uses this value — mixing the two produces the
+# misdiagnosis of reading `//account@host/share` as ownership.
+#SMBG_SMB_USER="youraccount"
 
 #===============================================================================
-# 필수 — 게스트(Linux, Samba 서버측)
+# Required — guest (Linux, the Samba server side)
 #===============================================================================
 
-# 게스트 안에서의 워크스페이스 실경로. 잔재 정리(깊은 순회)의 대상 루트다.
-# 호스트의 SMBG_MP 와 값이 같을 필요는 없다 — 서로 다른 파일시스템의 경로다.
+# The workspace's real path inside the guest. This is the root of the cruft cleanup
+# (the deep sweep). It need not equal the host's SMBG_MP — they are paths on
+# different filesystems.
 SMBG_GUEST_ROOT="/srv/workspace"
 
-# Samba 가 내보낼 공유 루트 (선택, 기본값 = SMBG_GUEST_ROOT).
+# The share root Samba exports (optional, defaults to SMBG_GUEST_ROOT).
 #
-# 위 SMBG_SHARE_SUBPATH 와 짝이다. **워크스페이스보다 한 단계 위**를 가리키게 하고,
-# 그 아래에 워크스페이스가 보이도록 bind mount 를 걸어 둔다:
-#   sudo install -d -o <소유자> -g <소유자> -m 755 /srv/ws /srv/ws/workspace
+# Pairs with SMBG_SHARE_SUBPATH above. Point it **one level above** the workspace
+# and bind mount the workspace so it appears beneath it:
+#   sudo install -d -o <owner> -g <owner> -m 755 /srv/ws /srv/ws/workspace
 #   echo '/srv/workspace /srv/ws/workspace none bind,x-systemd.requires-mounts-for=/srv/workspace 0 0' \
 #     | sudo tee -a /etc/fstab
 #
-# 여기에는 워크스페이스 외의 것을 두지 말 것 — 공유 루트에 생기는 이름은 그대로
-# "트리 전역에서 치환 불가한 basename" 이 된다.
+# Put nothing but the workspace here — any name that appears at the share root
+# becomes an "irreplaceable basename across the whole tree".
 #
-# 잔재 정리는 이 경로도 깊이 1 로 훑는다. Finder 가 .Trashes·.Spotlight-V100 등을
-# **마운트된 공유의 루트에** 만들기 때문이다.
+# The cruft cleanup sweeps this path at depth 1 as well, because the Finder creates
+# .Trashes, .Spotlight-V100 and friends **at the root of the mounted share**.
 #SMBG_EXPORT_ROOT="/srv/ws"
 
 #===============================================================================
-# 선택 — 기본값으로 충분하면 건드리지 않는다
+# Optional — leave alone if the defaults are enough
 #===============================================================================
 
-# launchd Label 접두사. plist 파일명과 Label 이 함께 이 값으로 생성된다.
-# 조직 고유의 역DNS 이름을 쓰는 것이 관례다.
+# launchd Label prefix. The plist filenames and the Labels are both generated from
+# this value. Using an organisation's reverse-DNS name is conventional.
 #SMBG_LABEL_PREFIX="io.stewardlabs"
 
-# 통합 로그 디렉터리. newsyslog 회전 설정도 이 경로로 생성된다.
+# Unified log directory. The newsyslog rotation configuration is generated for this
+# path too.
 #SMBG_LOGDIR="/var/log/smb"
 
-# autofs 트리거(디렉터리 open)의 상한(초). 맵에 `soft` 옵션이 있어야 이 값이 의미를
-# 갖는다 — hard 마운트에서는 서버 부재 시 무한 대기한다.
+# Upper bound (seconds) for the autofs trigger (a directory open). This value only
+# means anything if the map carries the `soft` option — on a hard mount an absent
+# server means waiting forever.
 #SMBG_TRIGGER_TIMEOUT=15
 
-# 스퓨리어스 웨이크 게이트(초). 이보다 짧게 잔 웨이크는 sleep-transition darkwake 로
-# 보고 처리를 통째로 건너뛴다.
+# Spurious-wake gate (seconds). A wake that slept less than this is treated as a
+# sleep-transition darkwake and handling is skipped entirely.
 #SMBG_SLEEP_GATE=30
 
-# 웨이크 시 소유자 GUI 세션에서 열 사용자 훅(선택). 로컬 볼륨 마운트 앱 등, 이 체계와
-# 무관하지만 웨이크 시점에 함께 처리하고 싶은 것을 지정한다. 경로가 존재할 때만 실행되며
-# 비워 두면 무동작이다.
-#SMBG_WAKE_USER_HOOK="/Users/사용자계정/bin/mount-local-volume.app"
+# Optional user hook to open in the owner's GUI session at wake. For things
+# unrelated to this system that you nonetheless want handled at wake time, such as
+# an app that mounts local volumes. It runs only if the path exists, and is a no-op
+# when empty.
+#SMBG_WAKE_USER_HOOK="/Users/youraccount/bin/mount-local-volume.app"
 
 #-------------------------------------------------------------------------------
-# 게스트 잔재 정리 (mac-cruft-cleanup)
+# Guest cruft cleanup (mac-cruft-cleanup)
 #
-# 이 두 값만 SMBG_ 접두사가 없다 — 스크립트를 손으로 돌릴 때 일회성 오버라이드로 쓰는
-# 관용이 있어서다:  PRUNE_NAMES=".git" sudo -E mac-cruft-cleanup
+# These two are the only values without the SMBG_ prefix — by convention they are
+# used as one-off overrides when running the script by hand:
+#   PRUNE_NAMES=".git" sudo -E mac-cruft-cleanup
 #-------------------------------------------------------------------------------
 
-# .Trashes 유예(일). 되돌릴 수 없는 휴지통은 휴지통이 아니므로 즉시 삭제하지 않는다.
+# .Trashes grace period (days). A trash you cannot undo is not a trash, so nothing
+# is deleted immediately.
 #TRASH_AGE_DAYS=7
 
-# 순회에서 통째로 건너뛸 디렉터리 **이름**(경로가 아니라 이름이므로 깊이와 무관하다).
-# 워크스페이스가 여러 레포를 품고 있어도 모든 .git / 빌드 산출물이 자동 제외된다.
-# .Trashes 는 별도 유예 정책으로 다루므로 목록에서 빼지 말 것.
+# Directory **names** to skip wholesale during the sweep (names, not paths, so it
+# applies regardless of depth). Every .git and every build artefact is excluded
+# automatically even when the workspace holds several repositories.
+# .Trashes is handled by a separate grace policy, so do not remove it from the list.
 #PRUNE_NAMES=".git .Trashes target node_modules"

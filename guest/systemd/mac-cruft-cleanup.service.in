@@ -1,11 +1,12 @@
 # /etc/systemd/system/mac-cruft-cleanup.service
 #
-# smb.conf 의 `veto files` 를 대체하는 사후 정리 (docs/decisions.md).
-# 차단이 아니라 정리이므로, 이 유닛이 실패해도 클라이언트는 정상 동작한다.
+# The post-hoc cleanup that replaces `veto files` in smb.conf (docs/decisions.md).
+# Being cleanup rather than blocking, a failure of this unit leaves the client
+# working normally.
 #
-# 이 파일은 템플릿이다. install.sh 가 워크스페이스 경로로 치환해 배치한다 —
-# systemd 는 ConditionPathIsDirectory=/ReadWritePaths= 에서 환경변수를 확장하지
-# 않으므로, 이 경로들은 배치 시점에 박혀 있어야 한다.
+# This file is a template. install.sh substitutes the workspace paths and deploys
+# it — systemd does not expand environment variables in ConditionPathIsDirectory=
+# or ReadWritePaths=, so those paths have to be baked in at deployment time.
 
 [Unit]
 Description=Purge macOS Finder cruft from the SMB workspace
@@ -13,19 +14,21 @@ ConditionPathIsDirectory=@GUEST_ROOT@
 
 [Service]
 Type=oneshot
-# 2번째 인자는 SMB 공유 루트다. 공유 루트가 워크스페이스보다 위에 있으면 Finder 는
-# 잔재(.Trashes·.Spotlight-V100·.fseventsd·.DS_Store)를 **공유 루트에** 만드는데
-# 그곳은 워크스페이스 밖이라 1번째 인자만으로는 영원히 훑지 않는다.
-# 두 값이 같으면 스크립트가 얕은 스윕을 건너뛴다.
+# The second argument is the SMB share root. When the share root sits above the
+# workspace, the Finder creates its cruft (.Trashes, .Spotlight-V100, .fseventsd,
+# .DS_Store) **at the share root**, which is outside the workspace and would never
+# be swept using the first argument alone.
+# When the two values are equal the script skips the shallow sweep.
 ExecStart=/usr/local/sbin/mac-cruft-cleanup @GUEST_ROOT@ @EXPORT_ROOT@
 
-# 15분 주기 find 가 빌드를 방해하지 않게 한다. 이 작업은 언제 끝나도 무방하다.
+# Keep the 15-minute find from disturbing builds. This job may finish whenever.
 Nice=10
 IOSchedulingClass=idle
 
-# 워크스페이스와 공유 루트 외에는 손대지 않는다.
-# **공유 루트가 여기 없으면 얕은 스윕의 삭제가 조용히 실패한다** — ProtectSystem=strict
-# 는 ReadWritePaths 에 없는 경로를 읽기 전용으로 만든다. 스크립트만 고쳐서는 안 된다.
+# Touch nothing but the workspace and the share root.
+# **If the share root is missing here, deletions in the shallow sweep fail
+# silently** — ProtectSystem=strict makes any path not in ReadWritePaths read-only.
+# Fixing only the script is not enough.
 ProtectSystem=strict
 ReadWritePaths=@GUEST_ROOT@ @EXPORT_ROOT@
 ProtectHome=yes

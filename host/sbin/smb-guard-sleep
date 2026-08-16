@@ -1,24 +1,25 @@
 #!/bin/bash
 # /usr/local/sbin/smb-guard-sleep
-# sleepwatcher -s 훅. 슬립 직전에 발화한다.
+# sleepwatcher -s hook. Fires just before sleep.
 #
-# 의도적으로 "기록만" 한다:
-#   1) macOS가 -s 훅에 주는 시간은 짧고 보장되지 않는다. 여기서 네트워크 I/O나
-#      umount를 시도하면 완료 전에 슬립이 진행될 수 있고, 중단된 umount는
-#      오히려 더 나쁜 중간 상태를 남긴다.
-#   2) 이 체계의 복구 전략은 "웨이크 측 수선"이다. 슬립 측은 웨이크 측이
-#      판단에 쓸 사실(직전 슬립 시각, 그때의 상태)만 남긴다.
+# It deliberately "records only":
+#   1) The time macOS grants a -s hook is short and not guaranteed. Attempting
+#      network I/O or an umount here can be cut off by sleep proceeding, and an
+#      interrupted umount leaves an even worse intermediate state.
+#   2) This system's recovery strategy is "repair on the wake side". The sleep
+#      side records only the facts the wake side needs for its decision (the time
+#      of the last sleep, and the state at that moment).
 #
-# 슬립 전 언마운트를 도입하고 싶다면 여기가 아니라 별도 검토가 필요하다
-# (freeze된 SMB 세션의 umount -f 는 그 자체로 수 초간 블록될 수 있다).
+# Introducing a pre-sleep unmount would need separate consideration, not a change
+# here (umount -f on a frozen SMB session can itself block for seconds).
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 SMBG_TAG="sleep"
 . /usr/local/lib/smb-guard/common.sh
-exec >>"$SMBG_LOG" 2>&1    # 새어나온 stdout/stderr도 같은 로그로 모은다.
-                           # 태그 없는 줄이 보이면 그 자체가 "누출 발생" 신호다.
+exec >>"$SMBG_LOG" 2>&1    # Collect leaked stdout/stderr into the same log.
+                           # An untagged line is itself the signal that something leaked.
 
-date +%s > "$SMBG_LAST_SLEEP" 2>/dev/null   # 웨이크 측 스퓨리어스 게이트용
+date +%s > "$SMBG_LAST_SLEEP" 2>/dev/null   # for the wake side's spurious-wake gate
 log "sleep — state=$(smbg_state)"
 exit 0
