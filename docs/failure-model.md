@@ -1,571 +1,657 @@
-# 고장 모델
+# Failure model
 
-SMB 로 마운트한 작업 디렉터리가 망가지는 경로를 8개 층으로 정리했다. 각 층은 **독립적으로
-발현**하며 증상이 서로 비슷해 오진하기 쉽다. 처방도 층마다 다르다.
+The ways a working directory mounted over SMB breaks are organised into 8 layers.
+Each layer **manifests independently**, and their symptoms resemble each other
+closely enough to invite misdiagnosis. The remedy differs per layer too.
 
-이 문서의 근거는 전부 실측이다 — `fs_usage` 추적, 통합 로그(`log show`), 게스트 저널,
-DiskArbitration 로그의 시각 상관. 추정인 항목은 그렇게 표시했다.
+Everything here rests on measurement — `fs_usage` traces, the unified log
+(`log show`), the guest journal, and time correlation against the DiskArbitration
+log. Items that are conjecture are marked as such.
 
 ---
 
-## 층 0 — 유휴 만료 창
+## Layer 0 — The idle expiry window
 
-**autofs 는 마지막 사용이 아니라 마운트 시각 기준으로 만료시킨다.** 기본
-`AUTOMOUNT_TIMEOUT` 은 3600초이고, 만료 검사는 약 120초 주기로 돈다. 즉 아무리 활발히
-쓰고 있어도 마운트한 지 1시간이 지나면 언마운트되고, 그 순간 **빈 창**이 열린다.
+**autofs expires by mount time, not by last use.** The default `AUTOMOUNT_TIMEOUT`
+is 3600 seconds and the expiry check runs roughly every 120 seconds. So no matter
+how actively it is being used, an hour after mounting it gets unmounted, and at that
+moment **an empty window** opens.
 
-그 창에서 누가 먼저 접근하느냐가 마운트 소유자를 결정한다(층 4).
+Who touches it first in that window decides the mount's owner (Layer 4).
 
 ```ini
 # /etc/autofs.conf
-AUTOMOUNT_TIMEOUT=604800     # 7일 = 만료 창을 사실상 제거
+AUTOMOUNT_TIMEOUT=604800     # 7 days = the expiry window effectively removed
 ```
 
-파일만 고치면 반영되지 않는다. **트리거 재생성 시점에 값이 박히므로** `sudo automount -vc`
-가 필수다.
+Editing the file alone does not apply it. **The value is baked in when the trigger
+is regenerated**, so `sudo automount -vc` is mandatory.
 
-> 유한한 타임아웃은 어떤 값이든 단독으로는 무의미하다. Time Machine 의 `backupd` 는
-> 30분 주기로 접근하므로, 1800초 이상이면 창이 매번 열린다. 창의 길이를 줄이는 것이
-> 아니라 창 자체를 없애는 것이 처방이다.
+> A finite timeout is meaningless on its own, whatever the value. Time Machine's
+> `backupd` touches the share every 30 minutes, so anything above 1800 seconds
+> means the window opens every time. The remedy is not shortening the window but
+> eliminating it.
 
 ---
 
-## 층 1 — 게스트 시계
+## Layer 1 — The guest clock
 
-호스트가 자면 가상 게스트의 시계도 멈춘다. 깨어난 뒤 수천 초 어긋난 시계로 파일을 쓰면
-mtime 이 미래가 되고, **mtime 기반 fingerprint 를 쓰는 빌드 도구(cargo 등)가 소스 변경을
-침묵 무시한다.** 컴파일이 성공하는데 결과물이 바뀌지 않는, 찾기 어려운 종류의 고장이다.
+When the host sleeps, the virtual guest's clock stops too. Writing files with a
+clock thousands of seconds off after waking puts mtimes in the future, and **build
+tools that use an mtime-based fingerprint (cargo and the like) silently ignore
+source changes.** Compilation succeeds while the output never changes — a
+hard-to-find kind of failure.
 
-### 하이퍼바이저 시간 동기화와 게스트 NTP 는 공존하지 못할 수 있다
+### Hypervisor time synchronisation and guest NTP may not coexist
 
-Parallels 의 `prltimesync` 는 기동할 때마다 `timedatectl set-ntp 0` 을 실행해 게스트 NTP
-유닛을 **disable + stop** 시킨다. 저널에 실명으로 남는다:
+Parallels' `prltimesync` runs `timedatectl set-ntp 0` every time it starts,
+**disabling and stopping** the guest NTP unit. It leaves its name in the journal:
 
 ```
-prltoolsd 기동 12ms 뒤 →  comm="timedatectl set-ntp 0"
+12ms after prltoolsd starts →  comm="timedatectl set-ntp 0"
 systemd-timedated: chrony.service: Disabling unit.
 ```
 
-이 사실을 모르면 "3계층 방어(하이퍼바이저 + NTP + resume step)"라고 믿는 구성이 실제로는
-구간별 1~2계층으로 돌고 있다가, 그 하나가 조용히 죽는다. 실제로 이 착시 상태에서
-**+76482초(약 21시간)** 스큐가 발생했다.
+Not knowing this, a configuration believed to be "three layers of defence
+(hypervisor + NTP + resume step)" is actually running on one or two layers at a
+time, and then that one dies quietly. A skew of **+76482 seconds (about 21 hours)**
+actually occurred in exactly that illusory state.
 
-수동으로 시작하면 오래 살고 부팅하면 0.36초 만에 죽는 비대칭이 단서였다 — 크래시가
-아니라 명시적 disable 이었던 것이다.
+The clue was the asymmetry: started by hand it lived a long time, started at boot it
+died within 0.36 seconds — it was not a crash but an explicit disable.
 
-### 확정 구성
+### The settled configuration
 
-| 계층 | 담당 | 근거 |
+| Layer | Owner | Rationale |
 |---|---|---|
-| 상시 권위 | 게스트 NTP (chrony) | `chronyc tracking` 과 저널로 전 이력이 남는다 — **계측 가능하다** |
-| resume step | `clockfix` (호스트 훅이 ssh 로 호출) | 호스트 시계를 권위로 즉시 step |
-| 하이퍼바이저 동기화 | **끈다** | 로그가 없고, 초록불 상태로 스큐를 통과시킨다 |
+| standing authority | guest NTP (chrony) | `chronyc tracking` and the journal keep the full history — **it is instrumentable** |
+| resume step | `clockfix` (called over ssh by the host hook) | steps immediately to the host clock as authority |
+| hypervisor synchronisation | **off** | no logs, and it lets skew through while showing a green light |
 
-배타가 강제라면 **계측 가능한 쪽을 남긴다.** 하이퍼바이저 동기화의 구조적 장점(호스트
-권위·무네트워크·즉시성)은 `clockfix` 가 이미 관측 가능한 형태로 동형 구현하고 있다.
+When exclusivity is forced, **keep the instrumentable one.** The structural
+advantages of hypervisor synchronisation (host authority, no network needed,
+immediacy) are already implemented isomorphically by `clockfix`, in an observable
+form.
 
-`prlctl set <VM> --time-sync off` 로 끄고, 게스트 NTP 는 [guest/chrony/](../guest/chrony/)
-의 지침을 따른다.
+Turn it off with `prlctl set <VM> --time-sync off`, and follow the guidance in
+[guest/chrony/](../guest/chrony/) for guest NTP.
 
-### 더 강한 처방 — 게스트 통합 도구를 설치하지 않는다
+### The stronger remedy — do not install the guest integration tools
 
-`--time-sync off` 는 **설정 한 줄이라 되돌아갈 수 있다.** 도구의 자동 업데이트·재설치나
-구성 복원이 다시 켜면 배타가 되살아나는데, 이 계층은 로그를 남기지 않으므로 다음 스큐가
-터질 때까지 드러나지 않는다. 끄는 것은 증상을 막고, 설치하지 않는 것은 원인을 없앤다.
+`--time-sync off` is **one line of configuration, so it can be reverted.** A tool's
+auto-update, reinstall or configuration restore turning it back on brings the
+exclusivity back, and since this layer leaves no log it stays hidden until the next
+skew erupts. Turning it off stops the symptom; not installing it removes the cause.
 
-헤드리스 개발 게스트라면 통합 도구가 주는 것 중 남는 것이 없다.
+On a headless development guest, nothing the integration tools provide is left.
 
-| 도구 기능 | 이 구성에서 |
+| Tool feature | In this setup |
 |---|---|
-| 클립보드·드래그앤드롭·디스플레이 연동 | 쓸 화면이 없다 (헤드리스) |
-| 공유 폴더 (`prl_fs`/HGFS) | 쓰지 않는다 — 이 설계는 반대 방향이다 (게스트가 SMB 서버) |
-| 호스트 `/etc/hosts` 에 게스트 이름 자동 등록 | 게스트를 고정 IP 로 두면 불필요하다 (아래) |
-| 시간 동기화 | **제거 대상 그 자체다** |
+| clipboard, drag-and-drop, display integration | there is no screen to use (headless) |
+| shared folders (`prl_fs`/HGFS) | unused — this design runs the other way round (the guest is the SMB server) |
+| automatic registration of the guest name in the host's `/etc/hosts` | unnecessary once the guest has a static IP (below) |
+| time synchronisation | **the very thing being removed** |
 
-**설치하지 않는 것이 기본값이고, 이미 설치했다면 제거가 `--time-sync off` 보다 강하다.**
+**Not installing them is the default, and if they are already installed, removal is
+stronger than `--time-sync off`.**
 
 ```bash
-# Parallels 의 경우
+# For Parallels
 sudo /usr/lib/parallels-tools/installer/install-cli.sh -r
 ```
 
-제거 로그에 X11·디스플레이 관련 파일의 `No such file` 이 다수 나오는 것은 헤드리스 설치라
-애초에 없던 구성요소를 지우려 한 것이며 **실패가 아니다.** 잔여 판정은 `prltoolsd` 프로세스,
-`prl_*` 커널 모듈, `/usr/lib/parallels-tools` 디렉터리로 한다 — 종료 메시지가 아니라
-잔여물로 판정한다(원칙 3: 판정은 1차 증거로).
+A removal log full of `No such file` for X11 and display-related files means it
+tried to delete components that were never there in a headless installation, and is
+**not a failure.** Determine what is left over from the `prltoolsd` process, the
+`prl_*` kernel modules and the `/usr/lib/parallels-tools` directory — judge by the
+residue, not by the closing message (Principle 3: base determination on primary
+evidence).
 
-**suspend/resume·자동 기동·PMU 가상화는 도구와 무관하다.** 하이퍼바이저 계층의 기능이므로
-제거해도 그대로 동작한다 — 이것이 제거를 주저할 이유가 되지 않는다.
+**suspend/resume, autostart and PMU virtualisation are unrelated to the tools.**
+They are hypervisor-layer features and keep working after removal — this is not a
+reason to hesitate.
 
-### 게스트는 고정 IP 로 둔다
+### Give the guest a static IP
 
-호스트의 마운트 URL(autofs 맵)과 ssh 별칭이 모두 게스트 이름 해석에 의존하고, 웨이크 훅의
-시계 교정이 그 ssh 를 탄다. 이름 해석이 흔들리면 층 1 의 처방 자체가 닿지 않는다.
+Both the host's mount URL (the autofs map) and the ssh alias depend on resolving the
+guest's name, and the wake hook's clock correction rides on that ssh. If name
+resolution wavers, Layer 1's remedy cannot even reach its target.
 
-통합 도구를 제거하면 호스트 `/etc/hosts` 항목을 **유지해 주는 주체가 사라진다.** mDNS
-(`<host>.local`)로 대체하는 선택지가 있으나 권하지 않는다 — 수면 복귀 직후 재광고가 지연되어
-웨이크 훅과 SMB 재연결이 이름 해석에서 막히는 구간이 생긴다. 즉 **고정 IP + 호스트의 정적
-`/etc/hosts` 항목**이 이 체계에서 가장 조용한 조합이다.
+Removing the integration tools **leaves nothing to maintain the host's `/etc/hosts`
+entry.** Replacing it with mDNS (`<host>.local`) is an option but not recommended —
+re-advertisement lags right after waking, creating a window where the wake hook and
+the SMB reconnection are blocked at name resolution. That is, **a static IP plus a
+static `/etc/hosts` entry on the host** is the quietest combination in this system.
 
-하이퍼바이저 DHCP 풀을 쓰는 경우 **풀의 시작 주소를 올려 고정 IP 대역을 비워 둔다.** 그렇게
-하면 기존에 DHCP 로 받아 쓰던 주소를 그대로 고정으로 승격할 수 있어 호스트측 설정을 함께
-바꿀 필요가 없다.
-
----
-
-## 층 2 — 스퓨리어스 웨이크
-
-수면 전환 중의 darkwake 나 즉시 웨이크에서 훅이 발화하면, 아직 아무것도 복구할 필요가
-없는데 네트워크 대기·ssh·마운트 교정을 시도한다.
-
-**처방**: 직전 수면 시각을 기록해 두고, 잔 시간이 임계(기본 30초) 미만이면 전체를 건너뛴다.
-
-> 검증 시 함정: AC 전원에서는 "화면 잠금 후 미수면" 정책이 재수면을 막는다.
-> `pmset sleepnow` 로 한 번 강제 수면 → 즉시 웨이크하면 그대로 깨어 있는 상태가 되고,
-> 이후 키를 눌러도 wake 이벤트가 없어 로그가 더 찍히지 않는다 — **훅 고장이 아니다.**
-> 실수면 테스트는 뚜껑을 닫아서 한다.
+When using a hypervisor DHCP pool, **raise the pool's start address to leave room
+for static IPs.** That way an address previously handed out by DHCP can be promoted
+to static as-is, without also having to change the host-side configuration.
 
 ---
 
-## 층 3 — TCC 프로브 블라인드
+## Layer 2 — Spurious wake
 
-launchd 데몬 컨텍스트에서 `ls` 를 실행하면 `Operation not permitted` (EPERM)가 난다.
-이것을 "마운트 실패"로 읽으면 오판이다.
+If the hook fires on a darkwake during the sleep transition, or on an immediate
+wake, it attempts a network wait, ssh and mount remediation when there is nothing to
+recover yet.
 
-**순서를 보면 이유가 분명하다:**
+**Remedy**: record the time of the last sleep and skip everything when the time
+slept is below a threshold (30 seconds by default).
+
+> A trap when verifying this: on AC power the "no sleep after screen lock" policy
+> prevents a second sleep. Forcing one sleep with `pmset sleepnow` and immediately
+> waking leaves the machine awake, and afterwards pressing a key produces no wake
+> event, so nothing more is logged — **the hook is not broken.**
+> Test a real sleep by closing the lid.
+
+---
+
+## Layer 3 — TCC probe blindness
+
+Running `ls` in a launchd daemon context gives `Operation not permitted` (EPERM).
+Reading that as "the mount failed" is a misjudgement.
+
+**The order makes the reason obvious:**
 
 ```
-open() → autofs 트리거 → automountd 가 사용자 자격으로 mount_smbfs → 마운트 성사
-       → 그 다음 readdir 가 TCC 에 거부되어 EPERM 출력
+open() → autofs trigger → automountd mounts with mount_smbfs under the user's credentials → mount succeeds
+       → only then does readdir get denied by TCC, printing EPERM
 ```
 
-거부된 것은 `readdir` 뿐이고 **`open()` 은 이미 일어났다.** 마운트는 성사돼 있다.
+What was denied is `readdir` alone, and **`open()` has already happened.** The mount
+is in place.
 
-**처방**: 판정을 mount 테이블 조회로 단일화한다. 그러면 이 층은 구조적으로 소멸하고,
-전체 디스크 접근 권한(FDA)도 필요 없어진다.
+**Remedy**: unify determination into a mount table lookup. That makes this layer
+structurally disappear, and Full Disk Access (FDA) becomes unnecessary too.
 
-> 같은 코드·같은 자격 전환이라도 **호출한 데몬이 다르면 결과가 다르다.** TCC 는
-> responsible process 단위로 귀속되므로, FDA 를 가진 바이너리의 자식은 통과하고 그렇지
-> 않은 데몬의 자식은 거부된다. 실제로 같은 래퍼를 통과한 `ls` 가 한쪽에서는 성공하고
-> 다른 쪽에서는 EPERM 이었다.
+> Even with the same code and the same credential switch, **the result differs
+> depending on which daemon invoked it.** TCC attributes per responsible process, so
+> a child of a binary that has FDA passes while a child of a daemon that does not is
+> denied. An `ls` going through the very same wrapper actually succeeded on one side
+> and returned EPERM on the other.
 >
-> 셸 스크립트에 FDA 를 주는 것은 인터프리터(`/bin/bash`)에 주는 것이므로 시스템 전역에
-> 광범위한 권한을 여는 일이다. **하지 않는다.** 판정에 `ls` 결과를 쓰지 않으면 FDA 없이
-> 정확히 동작한다.
+> Granting FDA to a shell script means granting it to the interpreter
+> (`/bin/bash`), which opens sweeping privileges system-wide. **Do not.** Without
+> using `ls` results for determination, it works exactly right with no FDA.
 
 ---
 
-## 층 4 — root 소유 마운트 (하이재킹)
+## Layer 4 — Root-owned mount (hijacking)
 
-`backupd`(Time Machine)가 30분 주기로 공유에 접근한다. 만료 창이 열려 있을 때 이것이
-먼저 트리거하면 **마운트가 root 소유로 성립하고, 사용자 프로세스는 `EACCES` 를 받는다.**
-사용자별 마운트는 공존하지 못하므로 스스로 낫지 않는다.
+`backupd` (Time Machine) touches the share every 30 minutes. When it triggers first
+while the expiry window is open, **the mount is established as root-owned and user
+processes get `EACCES`.** Per-user mounts cannot coexist, so it does not heal itself.
 
-- `tmutil disable` 은 무효다 (실측: 비활성화 후에도 접근 7회 지속).
-- `tmutil addexclusion` 은 층이 맞지 않는다 — 스냅샷 대상 제외이지 접근 차단이 아니다.
-- 디렉터리 `open()` 만이 트리거를 유발한다. `getattrlist`/`stat64`/`fsctl` 은 아니다.
+- `tmutil disable` has no effect (measured: 7 accesses continued after disabling).
+- `tmutil addexclusion` targets the wrong layer — it excludes from snapshots, it
+  does not block access.
+- Only a directory `open()` induces the trigger. `getattrlist`, `stat64` and `fsctl`
+  do not.
 
-**직접 증거**: 스냅샷 probe(`fs_snapshot_list ... not supported`) 2초 뒤에 root 소유
-smbd 세션이 열리는 상관이 확인됐다.
+**Direct evidence**: a correlation was confirmed where a root-owned smbd session
+opened 2 seconds after a snapshot probe (`fs_snapshot_list ... not supported`).
 
-### 하이재킹은 경합이다
+### Hijacking is a race
 
-빈 창에서 **먼저 트리거한 쪽이 소유자가 된다.** 워크스페이스에는 에디터·LSP·파일
-감시기·다른 셸의 cwd 등 사용자 프로세스가 상시 접근하므로, 사용자 쪽이 먼저 이기면
-하이재킹은 일어나지 않는다. 경쟁자는 사용자 앱만이 아니라 Spotlight(`mds`)·QuickLook·
-Finder 백그라운드 같은 시스템 프로세스도 포함한다.
+In the empty window, **whoever triggers first becomes the owner.** A workspace has
+user processes touching it constantly — editors, LSPs, file watchers, other shells'
+cwd — so when the user's side wins, no hijacking happens. The competitors are not
+only user applications but also system processes such as Spotlight (`mds`),
+QuickLook and Finder background activity.
 
-이것이 하이재킹이 **간헐적인 이유**다. 실측에서 만료 후 하이재킹까지 28분이 걸린 적도,
-10초가 걸린 적도 있다.
+This is **why hijacking is intermittent.** In measurements, the time from expiry to
+hijacking was once 28 minutes and once 10 seconds.
 
-> 재현 실험의 함정: 고장을 인위적으로 만들려는데 감시 데몬이 2초 만에 고쳐 버리면
-> 측정 대상이 측정 중에 바뀐다. **자기 치유 시스템을 측정할 때는 치유를 먼저 멈춘다.**
+> A trap in reproduction experiments: when you try to induce a failure artificially
+> but the watch daemon fixes it within 2 seconds, what you are measuring changes
+> while you measure it. **When measuring a self-healing system, stop the healing
+> first.**
 
-**처방**: 창 제거(층 0) + 마운트 이벤트 훅으로 즉시 교정. 하이재킹이 발생하는 순간이
-곧 마운트 이벤트이므로 `StartOnMount` 가 정확히 그 시점에 발화한다. 실측 종결 시간 **4초**.
+**Remedy**: eliminate the window (Layer 0) plus immediate remediation via the mount
+event hook. The moment hijacking occurs is itself a mount event, so `StartOnMount`
+fires at exactly that point. Measured time to resolution: **4 seconds**.
 
-### 층 4-b — 데몬 컨텍스트의 umount 거부 (원인 미확정)
+### Layer 4b — umount refused in a daemon context (cause undetermined)
 
-데몬 컨텍스트에서는 `umount -f` 가 EPERM 으로 실패한다. **기각된 가설 5건**:
+In a daemon context, `umount -f` fails with EPERM. **5 rejected hypotheses**:
 
-| 가설 | 반증 |
+| Hypothesis | Refuted by |
 |---|---|
-| TCC/FDA | FDA 없는 Terminal.app 에서 성공 |
-| 대상 마운트의 소유자 | root 소유 마운트도 로그인 세션에서는 언마운트됨 |
-| 수면 전환 중 커널 차단 | 수면과 무관한 수동 재현에서도 EPERM |
-| `umount` 가 저수준이라 실패가 잦다 | 왜 터미널에서만 성공하는지 설명하지 못함 |
-| 타이밍(마운트 직후 거부) | 즉시 umount 라운드 4회 전건 성공 |
+| TCC/FDA | it succeeds from Terminal.app without FDA |
+| the target mount's owner | even a root-owned mount unmounts from a login session |
+| kernel blocking during the sleep transition | EPERM also in manual reproduction unrelated to sleep |
+| `umount` is low-level so it fails often | does not explain why it succeeds only from a terminal |
+| timing (refused right after mounting) | 4 rounds of immediate umount all succeeded |
 
-남은 것은 실행 컨텍스트(launchd system 도메인 vs 로그인 세션)뿐이며 셸에서 재현할 수
-없다. **기능 영향이 없으므로 조사를 종료했다.**
+What remains is the execution context (launchd system domain vs login session), and
+it cannot be reproduced from a shell. **The investigation was ended because there is
+no functional impact.**
 
-**처방**: `diskutil unmount force` 를 1단계로 둔다. `diskutil` 은 스스로 언마운트하지 않고
-`diskarbitrationd`(시스템 데몬)에 위임하므로 **호출자의 실행 컨텍스트에 덜 의존한다.**
-`umount -f` 는 2단계 폴백으로 남긴다 — `diskarbitrationd` 가 응답하지 않을 때의 안전망이고,
-터미널에서 실행되는 수동 도구 경로에서는 실효가 있다.
+**Remedy**: put `diskutil unmount force` in stage 1. `diskutil` does not unmount by
+itself but delegates to `diskarbitrationd` (a system daemon), so it **depends less
+on the caller's execution context.** `umount -f` remains as the stage 2 fallback —
+it is the safety net for when `diskarbitrationd` does not respond, and it does have
+effect on the manual tool path that runs from a terminal.
 
-> 폴백을 지우지 않고 순서만 바꾼 부수 효과: 앞으로 로그에 `umount -f 폴백` 이 나타나면
-> 그것은 **`diskutil` 이 실패했다는 신호**이며 지금까지 관측된 적 없는 상황이다.
-> 정상 잡음이던 메시지가 이상 신호가 되어 진단 가치가 생긴다.
+> A side effect of reordering rather than deleting the fallback: from now on, a
+> `falling back to umount` appearing in the log is **the signal that `diskutil`
+> failed**, a situation never yet observed. A message that used to be normal noise
+> becomes an anomaly signal and gains diagnostic value.
 
 ---
 
-## 층 5 — 부수 파일 차단이 주 기능을 죽인다
+## Layer 5 — Blocking incidental files kills the primary function
 
-서버에서 `.DS_Store` 쓰기를 거부하면, **Finder 는 그 복사 작업 전체를 실패시킨다**
-(오류 `-8062`). 사용자에게는 "복사가 안 된다"로만 보이고, 대화상자는 실패한 경로를
-알려주지 않는다.
+When the server refuses a `.DS_Store` write, **the Finder fails the entire copy
+operation** (error `-8062`). To the user it looks only like "the copy does not
+work", and the dialog does not name the path that failed.
 
-### 치명 트리거는 "새 메타데이터 생성"이 아니다
+### The fatal trigger is not "creating new metadata"
 
-3케이스 대조 실험으로 확정했다:
+Settled by a three-case controlled experiment:
 
-| 소스 조건 | 터미널 `cp -r` | Finder |
+| Source condition | terminal `cp -r` | Finder |
 |---|---|---|
-| `.DS_Store` 없음 | 정상 | **정상** — 차단이 켜져 있어도 성공 |
-| 빈(0B) `.DS_Store` | 그 파일만 거부, 나머지 복사 | **팝업 없이 성공** — 조용히 제외 |
-| **실제(비어 있지 않은) `.DS_Store`** | 그 파일만 거부, 나머지 복사 | **-8062, 작업 중단** |
+| no `.DS_Store` | fine | **fine** — succeeds even with blocking on |
+| empty (0B) `.DS_Store` | that file refused, the rest copied | **succeeds without a dialog** — quietly excluded |
+| **a real (non-empty) `.DS_Store`** | that file refused, the rest copied | **-8062, operation aborted** |
 
-즉 치명 경로는 **소스 폴더에 이미 들어 있는 `.DS_Store` 를 페이로드로 복사**하는 것이다.
-맥에서 Finder 로 열어본 적 있는 폴더는 거의 전부 여기 해당하므로, 차단이 있는 한 Finder
-복사는 사실상 전면 불능이다.
+That is, the fatal path is **copying a `.DS_Store` already present in the source
+folder as part of the payload.** Almost every folder ever opened in the Finder on a
+Mac falls into that category, so as long as blocking is in place, Finder copying is
+effectively impossible.
 
-### `DSDontWriteNetworkStores` 는 이것을 막지 못한다
+### `DSDontWriteNetworkStores` does not prevent this
 
-**애초에 관할 밖이다.** 그 설정은 Finder 가 네트워크 볼륨에 **새** `.DS_Store` 를 생성하는
-것을 억제할 뿐이고, 소스에 이미 존재하는 파일을 복사하는 경로와 무관하다. 억제가 실효
-중인 맥에서 -8062 가 재현되는 것으로 실증됐다.
+**It is out of scope to begin with.** That setting only suppresses the Finder
+creating a **new** `.DS_Store` on a network volume; it has nothing to do with the
+path that copies a file already present in the source. Demonstrated by reproducing
+-8062 on a Mac where the suppression was in effect.
 
-### 처방: 차단을 폐지하고 사후 정리로 이관
+### Remedy: abolish blocking and move to post-hoc cleanup
 
-요구사항은 "SMB 계층에서 막는다"가 아니라 **"워크스페이스와 이력이 오염되지 않는다"**였다.
-같은 요구를 Finder 를 깨뜨리지 않고 만족시키는 계층이 셋 있다.
+The requirement was never "block it at the SMB layer" but **"the workspace and the
+history do not get polluted"**. Three layers satisfy the same requirement without
+breaking the Finder.
 
-| 계층 | 수단 | 실패해도 |
+| Layer | Means | If it fails |
 |---|---|---|
-| git | 전역 ignore / `.git/info/exclude` | 이력만 오염, Finder 정상 |
-| 파일시스템 | `mac-cruft-cleanup.timer` (15분 주기 회수) | 잔재가 남을 뿐, Finder 정상 |
-| 클라이언트 | `DSDontWriteNetworkStores` (**보조**) | 유입이 늘 뿐, Finder 정상 |
+| git | global ignore / `.git/info/exclude` | only the history is polluted, Finder fine |
+| filesystem | `mac-cruft-cleanup.timer` (reclamation every 15 min) | cruft is left behind, Finder fine |
+| client | `DSDontWriteNetworkStores` (**secondary**) | more inflow, Finder fine |
 
-**셋 다 실패해도 Finder 의 주 기능은 죽지 않는다.** 이것이 차단과의 결정적 차이다.
+**Even if all three fail, the Finder's primary function does not die.** That is the
+decisive difference from blocking.
 
-부분 유지(`.DS_Store` 만 차단 해제)를 택하지 않은 이유는, 어떤 항목이 다음번에 Finder 의
-전제가 될지 예측할 수 없기 때문이다 — 실제로 `.Trashes` 차단이 "휴지통으로 이동"을
-깨뜨리는 **잠복 버그**로 이미 존재하고 있었다.
+Partial retention (unblocking only `.DS_Store`) was not chosen because there is no
+predicting which item the Finder will make a premise of next — blocking `.Trashes`
+already existed as a **latent bug** breaking "Move to Trash".
 
-### 부수: `fruit:resource = stream` 금지
+### Aside: `fruit:resource = stream` is forbidden
 
-리소스 포크를 확장 속성으로 보내면 ext4 의 xattr 크기 한계(inode 여유 + 1블록, 통상
-4KB)를 그대로 물려받아 **같은 형태의 쓰기 실패**를 새로 만든다. `vfs_fruit(8)` 매뉴얼이
-`streams_xattr` 와 함께 쓰지 말라고 명시적으로 경고한다. 기본값 `file` 을 쓰되 의도를
-파일에 적어 둔다.
+Sending resource forks through extended attributes inherits ext4's xattr size limit
+(inode slack plus one block, typically 4KB) and creates **a fresh write failure of
+the same shape.** The `vfs_fruit(8)` manual explicitly warns against using it
+together with `streams_xattr`. Use the default `file`, and record the intent in the
+file.
 
-### 부수: `fruit:veto_appledouble = no` 는 반드시 남긴다
+### Aside: `fruit:veto_appledouble = no` must stay
 
-이름에 "veto" 가 들어 있으나 `veto files` 계열이 아니고, 값 `no` 는 차단이 아니라
-**차단 해제**다. 기본값 `yes` 는 fruit 이 만든 `._*` 를 클라이언트가 접근하지 못하게
-하는데, 매뉴얼이 그 부작용으로 "맥 클라이언트에서 Mac ZIP 아카이브 풀기 실패"를 든다 —
-`-8062` 와 **같은 고장 구조**다.
+Despite "veto" appearing in the name, it is not part of the `veto files` family, and
+the value `no` is not a block but **lifting one**. The default `yes` stops clients
+from reaching the `._*` files fruit creates, and the manual lists "unpacking Mac ZIP
+archives fails on Mac clients" as a side effect of that — **the same failure
+structure** as `-8062`.
 
-검증 grep 은 반드시 앵커를 쓴다. `grep -i veto` 는 이 줄을 오탐한다:
+The verification grep must be anchored. `grep -i veto` false-matches this line:
 
 ```bash
-testparm -s 2>/dev/null | grep -E '^\s*veto files'    # 0줄이어야 한다
+testparm -s 2>/dev/null | grep -E '^\s*veto files'    # must be 0 lines
 ```
 
 ---
 
-## 층 6 — 공유 루트 이름 충돌
+## Layer 6 — Share root name collision
 
-**공유 루트의 엔트리명과 같은 basename 을 가진 기존 파일은, 트리 어디에 있든 덮어쓰거나
-지울 수 없다.** 실패는 `ENOENT` 로 올라온다 — 파일이 분명히 있는데 "없다"고 한다.
+**An existing file whose basename matches an entry name at the share root cannot be
+overwritten or deleted, wherever it sits in the tree.** The failure surfaces as
+`ENOENT` — the file is plainly there, and yet it reports "not found".
 
-2026-08-15 실측(Samba 4.23.6-Ubuntu, macOS 26.6). C 하니스로 조건을 분리하고, 게스트에
-`log level = 10` 계측 smbd 를 별도 포트로 띄워 서버측 흐름을 확보했다.
+Measured 2026-08-15 (Samba 4.23.6-Ubuntu, macOS 26.6). Conditions were isolated with
+a C harness, and an instrumented smbd with `log level = 10` was brought up on a
+separate port on the guest to capture the server-side flow.
 
-### 규칙
+### The rule
 
-`rename(A,B)` 덮어쓰기와 `unlink(B)` 가 대상이다. **rename 고유 문제가 아니다.**
+`rename(A,B)` overwriting and `unlink(B)` are affected. **It is not specific to
+rename.**
 
-| 요인 | 영향 |
+| Factor | Effect |
 |---|---|
-| `basename(B)` 가 공유 루트 엔트리명과 일치 | **이것이 유일한 갈림길** |
-| B 가 아직 없음 | 성공 (그래서 "처음 한 번은 되고 두 번째부터 실패"로 보인다) |
-| 원본 A 의 이름 | 무관 — 목적지 이름만 문제다 |
-| 깊이 · 숨김 여부 · `O_EXCL` · 파일 크기 · 열린 fd · 프로세스 cwd | 전부 무관 |
-| 대상이 파일이냐 디렉터리냐 | 무관 (둘 다 실패) |
+| `basename(B)` matches an entry name at the share root | **this is the only thing that matters** |
+| B does not exist yet | succeeds (hence it looks like "works the first time, fails from the second") |
+| the name of the source A | irrelevant — only the destination name matters |
+| depth, hidden or not, `O_EXCL`, file size, open fds, process cwd | all irrelevant |
+| whether the target is a file or a directory | irrelevant (both fail) |
 
-### 원인
+### The cause
 
-Samba 는 파일 삭제 시 `close_remove_share_mode()` → `delete_all_streams()`
-(`source3/smbd/close.c`)로 대체 데이터 스트림을 지운다. 이때 파일을 다시 여는 경로가
-전체 상대경로가 아니라 **basename 만** 써서 **공유 루트 기준으로 해석된다**:
+When deleting a file, Samba clears alternate data streams via
+`close_remove_share_mode()` -> `delete_all_streams()` (`source3/smbd/close.c`). The
+path that reopens the file there uses **only the basename** rather than the full
+relative path, so it **resolves against the share root**:
 
 ```
 delete_all_streams found 2 streams
 openat_pathref_fsp: smb_fname [config]
-file_name_hash: /opt/stewardlabs/config          ← 실제 대상은 tmp/…/config
+file_name_hash: /opt/stewardlabs/config          <- the real target is tmp/…/config
 delete_all_streams failed: NT_STATUS_OBJECT_NAME_NOT_FOUND
 ```
 
-공유 루트에 같은 이름이 있으면 **엉뚱한 객체**를 열어 스트림 삭제가 실패하고, 없으면
-ENOENT 가 정상 종료로 취급되어 통과한다. 클라이언트는 이 CLOSE 실패를 받고 rename 요청을
-아예 보내지 않는다 — 성공 케이스는 rename 이 2회 기록되는데 실패 케이스는 1회뿐이다.
+With a matching name at the share root it opens **the wrong object** and stream
+deletion fails; without one, the ENOENT is treated as a normal completion and it
+passes. The client receives this CLOSE failure and never sends the rename request at
+all — a successful case records rename twice, a failing case only once.
 
-**스트림은 클라이언트가 아니라 서버의 `vfs_fruit` 가 항상 보고한다**(AFP_AfpInfo /
-AFP_Resource). 그래서 클라이언트 마운트 옵션으로는 못 고친다 — `nostreams`,
-`nomdatacache`, `nodatacache`, `nonotification`, `soft`, `forcenewsession` 전부 무효로
-실측됐다. 공유 루트의 실제 항목은 손상되지 않는다(inode·mtime 불변 확인).
+**The streams are reported not by the client but always by the server's
+`vfs_fruit`** (AFP_AfpInfo / AFP_Resource). That is why client mount options cannot
+fix it — `nostreams`, `nomdatacache`, `nodatacache`, `nonotification`, `soft` and
+`forcenewsession` were all measured to have no effect. The actual entries at the
+share root are not damaged (inode and mtime confirmed unchanged).
 
-### 왜 치명적인가 — git 이 깨진다
+### Why it is fatal — git breaks
 
-git 의 `lock_file` 은 `X.lock` 에 쓰고 `rename(X.lock, X)` 한다. `.git/config` 의
-basename 이 `config` 이므로, 공유 루트에 `config` 라는 이름이 있으면 **config 가 이미
-존재하는 두 번째 쓰기부터 전부 실패한다.** `git init` 이 36바이트
-(`[core]\n\trepositoryformatversion = 0\n`)에서 멈추는 것이 정확히 이것이다.
+git's `lock_file` writes to `X.lock` and then does `rename(X.lock, X)`. Since the
+basename of `.git/config` is `config`, having a name `config` at the share root
+means **every write from the second one onward fails, because config already
+exists.** `git init` stopping at 36 bytes
+(`[core]\n\trepositoryformatversion = 0\n`) is precisely this.
 
-`commit`·`push` 의 본작업은 성공하고 config 쓰기만 실패하므로 **부분 성공이라 놓치기
-쉽다**(`push -u` 의 upstream 등록, `worktree add` 의 브랜치 등록). 그리고 실패한 쓰기가
-`.git/config` 를 반쯤 쓰인 상태로 남겨 **손상이 누적된다** — 섹션 헤더와 `remote =` 만
-있고 다음 줄이 공백인 상태가 실제로 발생해 `fatal: bad config line N` 으로 저장소 전체가
-죽었다. 삭제도 config 쓰기이므로 손상은 스스로 회복되지 않는다.
+The main work of `commit` and `push` succeeds and only the config write fails, so
+**it is easy to miss as a partial success** (upstream registration by `push -u`,
+branch registration by `worktree add`). And the failed write leaves `.git/config`
+half-written, so **damage accumulates** — a state with a section header and a
+`remote =` and then a blank line actually occurred, killing the whole repository with
+`fatal: bad config line N`. Deletion is also a config write, so the damage does not
+heal itself.
 
-### 판별
+### Determination
 
-`tools/probe-rename-collision.sh` 가 공유 루트의 엔트리 이름으로 덮어쓰기 rename 을 실제로
-시도해 오염된 집합을 뽑는다. 대조군이 함께 돌아가므로 "실패가 0건"이 정상인지 측정 무효인지
-구분된다.
+`tools/probe-rename-collision.sh` actually attempts an overwriting rename with each
+entry name of the share root and extracts the contaminated set. A control runs
+alongside it, so "zero failures" can be distinguished between healthy and an invalid
+measurement.
 
-### 상류 — Samba 의 회귀이며 master 에서는 고쳐졌다
+### Upstream — it is a Samba regression, fixed on master
 
-우리 환경 고유 문제가 아니라 **Samba 의 회귀**다. `09f49fb56a4`(smbd: Simplify
-delete_all_streams())가 `delete_all_streams()` 를 `synthetic_pathref()` 대신
-`synthetic_smb_fname()` 을 쓰도록 바꾸면서, `SMB_VFS_UNLINKAT()` 에 넘기는 base_name 이
-공유 루트 기준이 아니라 **dirfsp 기준**이 되었다. 그런데 `streams_xattr_unlinkat()` 은
-`fsp == NULL` 일 때 여전히 `handle->conn->cwd_fsp`(= 공유 루트)로 pathref 를 만들고 있었다.
+This is not specific to our environment but **a Samba regression**. `09f49fb56a4`
+(smbd: Simplify delete_all_streams()) changed `delete_all_streams()` to use
+`synthetic_smb_fname()` instead of `synthetic_pathref()`, which made the base_name
+passed to `SMB_VFS_UNLINKAT()` relative to **dirfsp** rather than to the share root.
+But `streams_xattr_unlinkat()` was still building its pathref from
+`handle->conn->cwd_fsp` (= the share root) when `fsp == NULL`.
 
 | | |
 |---|---|
-| 회귀 도입 | `09f49fb56a4` — smbd: Simplify delete_all_streams() |
-| 수정 | `2fc21d87` — s3:vfs_streams_xattr: Use dirfsp in streams_xattr_unlinkat() (master, 2026-06-16) |
-| 상류 버그 | [16144](https://bugzilla.samba.org/show_bug.cgi?id=16144) |
-| 실측 대상 | 4.23.6-Ubuntu — `v4-23-stable` 소스에 **미반영** 확인 |
+| regression introduced | `09f49fb56a4` — smbd: Simplify delete_all_streams() |
+| fix | `2fc21d87` — s3:vfs_streams_xattr: Use dirfsp in streams_xattr_unlinkat() (master, 2026-06-16) |
+| upstream bug | [16144](https://bugzilla.samba.org/show_bug.cgi?id=16144) |
+| version measured | 4.23.6-Ubuntu — confirmed **not present** in the `v4-23-stable` source |
 
-수정 커밋의 설명이 우리가 관측한 것과 같다: *"path resolution to fail for files in
-subdirectories, leaving xattr streams intact after an OVERWRITE or OVERWRITE_IF
-disposition."*
+The fix commit's description matches what we observed: *"path resolution to fail for
+files in subdirectories, leaving xattr streams intact after an OVERWRITE or
+OVERWRITE_IF disposition."*
 
-**릴리스 브랜치에는 아직 백포트되지 않았다.** 상류 버그는 증상을 `smb2.streams` 자체
-테스트의 실패로 서술하고 있어, **하위 디렉터리의 기존 파일을 덮어쓸 때 클라이언트가
-ENOENT 를 받는 사용자 가시 고장**이라는 점은 드러나 있지 않다 — 우리 쪽 관측이 상류에
-보탤 수 있는 부분이 그것이다.
+**It has not been backported to the release branches yet.** The upstream bug
+describes the symptom as a failure of the `smb2.streams` test itself, so it does not
+surface the point that this is **a user-visible failure where the client receives
+ENOENT when overwriting an existing file in a subdirectory** — that is what our
+observation could add upstream.
 
-따라서 아래 처방은 백포트를 기다리는 임시 우회가 아니라 **지금 유효한 처방**이다.
-백포트된 버전으로 올라간 뒤 배치를 되돌릴지는 그때 재검토한다(open-questions.md).
+The remedy below is therefore not a temporary workaround pending a backport but
+**the remedy that is valid now.** Whether to undo the layout after moving to a
+version carrying the fix is reconsidered then (open-questions.md).
 
-### 처방: 공유 루트를 워크스페이스 상위로 올린다
+### Remedy: raise the share root above the workspace
 
-충돌 집합은 공유 루트의 엔트리 목록이다. **워크스페이스를 직접 내보내면 그 루트의 모든
-이름이 곧 충돌 집합이 된다** — `config`·`docs`·`web` 같은 레포 디렉터리명이 전부 여기
-해당한다. 공유 루트를 한 단계 위로 올리고 그 아래에 워크스페이스만 두면 충돌 집합이
-워크스페이스명 하나로 줄고, git 내부 파일명(`config`·`index`·`HEAD`·`packed-refs`)과
-겹치지 않는다. 클라이언트는 공유의 하위 디렉터리를 마운트하므로 보이는 레이아웃은
-그대로다.
+The collision set is the share root's entry list. **Exporting the workspace directly
+makes every name at that root the collision set** — repository directory names such
+as `config`, `docs` and `web` all fall into it. Raising the share root one level and
+putting only the workspace beneath it shrinks the collision set to the single
+workspace name, which does not overlap git's internal filenames (`config`, `index`,
+`HEAD`, `packed-refs`). The client mounts a subdirectory of the share, so the layout
+it sees is unchanged.
 
-기각한 대안: `fruit:metadata = netatalk` + `streams_xattr` 제거. 스트림 자체를 없애므로
-동작은 하지만 **소파일 생성이 5배 느리고**(150개 기준 2.0s → 10.3s) 파일마다 `._`
-사이드카가 생긴다(150/150). 층 5 가 `._*` 를 회수 대상으로 삼고 있어 잔재량도 그만큼
-늘어난다.
+Rejected alternative: `fruit:metadata = netatalk` + removing `streams_xattr`. It
+eliminates the streams and does work, but **small-file creation is 5x slower**
+(2.0s -> 10.3s for 150 files) and every file gets a `._` sidecar (150/150). Layer 5
+treats `._*` as a reclamation target, so the volume of cruft grows accordingly too.
 
-### 부수 효과: 공유 루트를 올리면 잔재도 함께 올라간다
+### Side effect: raising the share root raises the cruft with it
 
-Finder 는 `.Trashes`·`.Spotlight-V100`·`.fseventsd`·`.DS_Store` 를 **마운트된 공유의
-루트에** 만든다. 공유 루트가 곧 워크스페이스이던 시절에는 층 5 의 정리 순회가 자동으로
-이것들을 덮었지만, 공유 루트를 올리면 그곳이 `SMBG_GUEST_ROOT` 밖이 되어 타이머가 영원히
-훑지 않는다. 기능 고장은 아니지만 잔재가 조용히 쌓이고, 특히 `.Trashes` 는 Finder 로 지운
-파일이 회수되지 않은 채 남는다.
+The Finder creates `.Trashes`, `.Spotlight-V100`, `.fseventsd` and `.DS_Store`
+**at the root of the mounted share.** Back when the share root was the workspace,
+Layer 5's cleanup sweep covered these automatically; once the share root is raised,
+that place falls outside `SMBG_GUEST_ROOT` and the timer never sweeps it. It is not
+a functional failure, but cruft quietly accumulates, and `.Trashes` in particular
+keeps files deleted through the Finder unreclaimed.
 
-그래서 `mac-cruft-cleanup` 이 공유 루트를 **깊이 1** 로 한 번 더 훑는다(`-maxdepth 1`,
-순회 비용 사실상 0). **스크립트만 고치면 안 된다** — 유닛에 `ProtectSystem=strict` 가
-걸려 있어 `ReadWritePaths` 에 공유 루트가 없으면 삭제가 조용히 실패한다. 두 변경이 짝이다.
+So `mac-cruft-cleanup` sweeps the share root once more at **depth 1**
+(`-maxdepth 1`, traversal cost effectively zero). **Fixing the script alone is not
+enough** — the unit carries `ProtectSystem=strict`, so without the share root in
+`ReadWritePaths` the deletion fails silently. The two changes are a pair.
 
 ---
 
-## 층 7 — 서버 로컬 쓰기는 클라이언트 캐시에 비가시적이다
+## Layer 7 — Server-local writes are invisible to the client cache
 
-**게스트(서버 로컬)가 쓰고 맥(SMB)이 읽는 조합에서만** 옛 내용이 반환된다. 맥→맥,
-맥→게스트는 정상이다. 서버 로컬 쓰기는 파일시스템에 직접 일어나 smbd 를 거치지 않으므로,
-클라이언트에게 캐시 무효화를 밀어줄 주체가 없다. Samba 버그가 아니라 "SMB 로 내보낸
-트리를 서버 로컬에서도 동시에 쓴다"는 패턴이 SMB 일관성 모델 밖인 것이다.
+**Only in the combination where the guest (server-local) writes and the Mac (SMB)
+reads** does old content come back. Mac-to-Mac and Mac-to-guest are fine. A
+server-local write goes straight to the filesystem without passing through smbd, so
+there is nothing to push a cache invalidation to the client. This is not a Samba
+bug; the pattern "write to a tree exported over SMB from the server locally as well"
+is outside SMB's consistency model.
 
-호스트 편집기 + 게스트 툴체인 구성에서는 이 조합이 일상이다 — 게스트 빌드가 만든 산출물,
-게스트에서 실행된 git 명령의 결과, 게스트 세션이 수정한 소스를 맥이 읽는 모든 경우.
+In a host-editor plus guest-toolchain setup that combination is routine — build
+artefacts produced by the guest, results of git commands run on the guest, sources
+modified by a guest session, all read by the Mac.
 
-### 규모 — stale 은 시간 제한이 아니라 이벤트 제한이다
+### Scale — staleness is bounded by events, not by time
 
-실측 (2026-08-16, macOS 26.6 클라이언트 + Samba 4.23.6, 폴링 0.5s):
+Measured 2026-08-16 (macOS 26.6 client + Samba 4.23.6, polling at 0.5s):
 
-| 읽기 패턴 | staleness |
+| Read pattern | Staleness |
 |---|---|
-| 같은 파일을 반복 폴링 (소파일) | 1.1~1.7s 에 자가 치유 |
-| 오래된 mtime 파일을 반복 폴링 | ~29s (속성 캐시 상한. 파일 나이 30일/1시간 무관) |
-| 4MB 전체 읽기 반복 | ~1.2s |
-| **한 번 읽고 T초 후 단발 재읽기** | **T=5~120s 전부 stale** |
-| **열린 fd 로 재읽기 (에디터·도구 패턴)** | **≥180s 미해소** |
-| **4MB 부분 읽기 (선두 64B) 반복** | **≥900s 미해소** |
+| polling the same file repeatedly (small file) | self-heals in 1.1-1.7s |
+| polling a file with an old mtime repeatedly | ~29s (the attribute cache ceiling. Independent of file age, 30 days or 1 hour) |
+| repeated full reads of 4MB | ~1.2s |
+| **read once, then a single re-read T seconds later** | **stale for all of T=5-120s** |
+| **re-reading through a held fd (the editor and tooling pattern)** | **unresolved at >=180s** |
+| **repeated partial reads of 4MB (leading 64B)** | **unresolved at >=900s** |
 
-미해소 행은 상한 도달이지 해소가 아니다. 해소 이벤트는 unmount, 캐시 축출, 아래 쌍안정의
-상태 전환뿐이다. 실사용 접근(단발 cat, 에디터 재읽기, 부분 읽기)이 정확히 미해소 부류라서
-"내용이 수 분 stale"로 관측된다. 캐시가 없는 파일(첫 읽기)은 0.02s — stale 은 전적으로
-"먼저 읽어 캐시를 채운" 파일의 문제다.
+The unresolved rows are where the measurement ceiling was reached, not resolution.
+The only resolving events are unmount, cache eviction, and the state transition of
+the bistability below. Real-world access (a one-shot cat, an editor re-read, a
+partial read) falls exactly into the unresolved category, which is why it is
+observed as "content stale for minutes". A file with no cache (a first read) takes
+0.02s — staleness is entirely a problem of files whose cache was filled by an
+earlier read.
 
-### 기전 — lease 는 깨지지 않고, stale 은 캐시가 활성일 때만 존재한다
+### Mechanism — the lease is never broken, and staleness exists only when the cache is active
 
-- 맥 클라이언트는 읽은 파일에 SMB2 lease `(RH)` 를 받아 쥔다. **게스트 로컬 쓰기 후에도
-  lease 는 그대로다** (`smbstatus --locks` 로 쓰기 전후 대조). break 를 보낼 주체가
-  없으니 당연하다.
-- 그러나 lease 보유가 곧 캐시 사용이 아니다. **클라이언트가 데이터 캐시를 실제로 쓰는지
-  자체가 상태에 따라 갈린다** (아래 쌍안정). 캐시 비활성 상태에서는 lease 를 쥔 채로도
-  모든 읽기가 서버로 왕복하므로 stale 이 원천적으로 불가능하다 — 실측: 기본 옵션
-  마운트에서 held-fd 64KB 재읽기 1000회가 전량(64MB) 재전송됐다 (서버 인터페이스
-  tx_bytes 대조, 바이트 일치, 대조 마운트 2회 재현).
-- 캐시 활성 상태 안에서는 `kernel change notify` (Samba 기본 yes, inotify 기반)가
-  능동 관찰자를 구제한다. notifyd 는 **서버 로컬 쓰기도 inotify 로 본다.**
-  `= no` 로 끄면 폴링 치유가 무기한으로 퇴화하는 것을 확인했다 (동일 프로토콜에서
-  fast/무기한 교대 관측 — 교대 자체의 원인은 미해명). 단발·held-fd·부분읽기의 무기한
-  stale 은 notify 가 켜진 상태의 실측이다 — push 는 능동 관찰자만 구제한다.
-- 디렉터리 열거(`ls`)만은 상태·notify 와 무관하게 항상 신선하다(0.01s) — 열거는 캐시를
-  경유하지 않고 서버 왕복한다.
+- The Mac client takes and holds an SMB2 lease `(RH)` on a file it has read. **The
+  lease survives a guest-local write unchanged** (compared before and after the
+  write with `smbstatus --locks`). Naturally so, since there is nobody to send a
+  break.
+- But holding a lease is not the same as using the cache. **Whether the client
+  actually uses its data cache is itself state-dependent** (see the bistability
+  below). In the cache-inactive state every read goes to the server even while
+  holding a lease, so staleness is impossible in principle — measured: on a
+  default-options mount, 1000 held-fd 64KB re-reads were retransmitted in full
+  (64MB) (compared against the server interface's tx_bytes, byte-exact, reproduced
+  across 2 comparison mounts).
+- Within the cache-active state, `kernel change notify` (Samba default yes,
+  inotify-based) rescues an active observer. notifyd **sees server-local writes too,
+  via inotify.** Setting it to `= no` was confirmed to degrade polling-based healing
+  to indefinite (fast and indefinite alternating under the same protocol — the cause
+  of the alternation itself is unexplained). The indefinite staleness of one-shot,
+  held-fd and partial reads was measured with notify on — a push rescues only active
+  observers.
+- Directory enumeration (`ls`) alone is always fresh (0.01s) regardless of state or
+  notify — enumeration bypasses the cache and goes to the server.
 
-### 쌍안정 — 갈리는 것은 클라이언트 캐시 사용 자체다
+### Bistability — what differs is whether the client cache is used at all
 
-같은 smb.conf, 같은 smbd 프로세스(PID 동일), 같은 SMB 세션에서 두 상태가 모두 관측됐다:
+Both states were observed with the same smb.conf, the same smbd process (identical
+PID) and the same SMB session:
 
-- **캐시 활성 상태 (위험)**: 단발·held-fd·부분읽기 무기한 stale. 25분간 일관 재현.
-  stale 내용이 반환된다는 것 자체가 캐시 서빙의 증거다.
-- **캐시 비활성 상태**: 모든 읽기가 서버로 왕복한다 — held-fd 64KB 재읽기 1000회
-  전량(64MB) 재전송 실측. stale 이 원천적으로 불가능하고, lease `(RH)` 는 이
-  상태에서도 부여된다. **lease 보유 ≠ 캐시 사용.**
+- **Cache-active state (dangerous)**: one-shot, held-fd and partial reads stale
+  indefinitely. Reproduced consistently for 25 minutes. That stale content is
+  returned at all is itself the evidence of cache serving.
+- **Cache-inactive state**: every read goes to the server — measured as 1000 held-fd
+  64KB re-reads retransmitted in full (64MB). Staleness is impossible in principle,
+  and the lease `(RH)` is granted in this state too. **Holding a lease != using the
+  cache.**
 
-초판은 비활성 상태의 신선함을 "notify push 치유"로 해석했으나, 후속 실측(위 트래픽
-대조)이 더 단순한 설명을 강제했다: 치유된 것이 아니라 **애초에 캐시에서 읽지 않는다.**
-notify 의 실효 증거(끄면 폴링 치유가 퇴화)는 캐시 활성 상태 안의 관측으로 한정된다.
+The first version interpreted the inactive state's freshness as "healing by notify
+push", but a follow-up measurement (the traffic comparison above) forced a simpler
+explanation: it was not healed — **it never reads from the cache in the first
+place.** The evidence for notify's effect (turning it off degrades polling-based
+healing) is confined to observations within the cache-active state.
 
-전환은 `smbcontrol all reload-config` 2회와 시간적으로 일치했다 (인과 미확증). inotify
-큐 오버플로(큐 한계 16384 의 3배인 5만 이벤트 폭풍)로 활성 상태 재유발을 시도했으나
-실패했다. **무엇이 캐시 활성/비활성을 결정하는지는 미해명이다** —
-[open-questions.md](open-questions.md) 참조.
+The transition coincided in time with two `smbcontrol all reload-config` calls
+(causality unconfirmed). An attempt to re-induce the active state via inotify queue
+overflow (a storm of 50,000 events, three times the queue limit of 16384) failed.
+**What determines cache-active versus cache-inactive is unexplained** — see
+[open-questions.md](open-questions.md).
 
-캐시 상태의 판별은 트래픽으로 한다 (읽기 패턴별 캐시 여부가 달라 타이밍은 속는다 —
-전체 순차 읽기는 활성 상태에서도 read-through 다):
+Determine the cache state from traffic (timing deceives, since cache behaviour
+differs by read pattern — a full sequential read is read-through even in the active
+state):
 
 ```bash
-# 게스트 인터페이스 tx_bytes 를 전후 대조 — held-fd 재읽기가 재전송되면 비활성
-a=$(ssh <게스트> cat /sys/class/net/<iface>/statistics/tx_bytes)
+# Compare the guest interface's tx_bytes before and after — retransmitted held-fd re-reads mean inactive
+a=$(ssh <guest> cat /sys/class/net/<iface>/statistics/tx_bytes)
 python3 -c "
-f=open('<마운트>/<파일>','rb')
+f=open('<mount>/<file>','rb')
 for _ in range(1000): f.seek(0); f.read(65536)"
-b=$(ssh <게스트> cat /sys/class/net/<iface>/statistics/tx_bytes)
-echo $(( (b-a)/1024 ))KB   # ~0 = 캐시 활성, ~64000 = 비활성
+b=$(ssh <guest> cat /sys/class/net/<iface>/statistics/tx_bytes)
+echo $(( (b-a)/1024 ))KB   # ~0 = cache active, ~64000 = inactive
 ```
 
-stale(= 캐시 활성 상태)을 다시 만나면 **고치기 전에 채집하라** (원칙 22 — 자기 치유를
-먼저 멈춰라. `reload-config` 가 상태를 지울 수 있다):
+If you meet staleness (i.e. the cache-active state) again, **collect before you fix
+it** (Principle 22 — stop the healing first. `reload-config` can erase the state):
 
 ```bash
-sudo smbstatus --locks                      # ① 맥이 쥔 lease
-grep -i lease /proc/locks                   # ② 커널 lease (없어야 정상)
-ps -ef | grep notifyd                       # ③ notifyd 생존
-# ④ 게스트에서 쓰고 맥에서 60초 뒤 단발 읽기로 재현 확인
-# ⑤ 위 트래픽 프로브로 캐시 활성 확인 — 이때가 nodatacache 실효를 실측할 유일한 기회다
-# 그 다음에야: sudo smbcontrol all reload-config
+sudo smbstatus --locks                      # (1) the lease the Mac holds
+grep -i lease /proc/locks                   # (2) kernel leases (none is normal)
+ps -ef | grep notifyd                       # (3) notifyd is alive
+# (4) write on the guest and confirm reproduction with a single read 60s later on the Mac
+# (5) confirm the cache is active with the traffic probe above — this is the only chance to measure nodatacache's effect
+# and only then: sudo smbcontrol all reload-config
 ```
 
-### 처방: 클라이언트 마운트에 `nodatacache`
+### Remedy: `nodatacache` on the client mount
 
-autofs 맵의 마운트 옵션에 `nodatacache` 를 추가한다 ([install.md](install.md)).
-의미는 쌍안정에 대한 봉쇄다: **캐시 활성 상태(위험 상태)로의 진입 자체를 막는다.**
-캐시 비활성 상태에서는 no-op 이므로 잃는 것이 없고, 활성 상태가 오려던 순간에는 stale
-가능성이 제거된다. 검증한 세 후보 중 상태 전환·notify 어느 쪽에도 의존하지 않는 유일한
-처방이다.
+Add `nodatacache` to the autofs map's mount options ([install.md](install.md)). Its
+meaning is containment of the bistability: **it blocks entry into the cache-active
+(dangerous) state itself.** In the cache-inactive state it is a no-op, so nothing is
+lost, and at the moment the active state would have arrived, the possibility of
+staleness is removed. Of the three candidates tested it is the only remedy that
+depends on neither the state transition nor notify.
 
-비용 실측 (기본↔옵션 A-B-B-A 교차, 각 3회 중앙값):
+Measured cost (default vs option, A-B-B-A crossover, median of 3 each):
 
-| 작업 부하 | 기본 | nodatacache |
+| Workload | Default | nodatacache |
 |---|---|---|
-| 문서 20개 연속 읽기 | 0.087s | 0.089s |
-| git status+diff ×3 저장소 | 1.35s | 1.35s |
-| 트리 열거 + 내용 읽기 (17.8k 파일) | 6.64s | 6.62s |
-| node_modules 22k 엔트리 열거 | 62.7s | 62.6s |
+| 20 documents read in sequence | 0.087s | 0.089s |
+| git status+diff across 3 repositories | 1.35s | 1.35s |
+| tree enumeration plus content reads (17.8k files) | 6.64s | 6.62s |
+| enumerating 22k node_modules entries | 62.7s | 62.6s |
 
-단서: 이 대조는 **기본측이 캐시 비활성 상태**일 때의 측정이라 같게 나온 것이 자명하다
-(초판은 이를 몰랐다). 유효한 결론은 "단일 패스 작업(위 4형)은 캐시 유무의 영향권 밖"
-까지다 — 매 반복 fresh mount 라 캐시 이득이 원래 없는 형태들이다. **캐시 활성 상태
-대비 재읽기-집중 작업의 비용은 미측정으로 남는다.** 같은 파일을 반복해 읽는 작업은
-활성 상태의 캐시(RAM) 대신 매번 네트워크 왕복이 되나, 로컬 하이퍼바이저 링크에서
-소파일 왕복은 ms 미만이라 소스·문서 작업에는 실질 영향이 없다고 판단한다.
+A caveat: this comparison was measured while **the baseline side was in the
+cache-inactive state**, which makes the equality self-evident (the first version did
+not know this). The valid conclusion goes only as far as "single-pass workloads (the
+4 above) are outside the influence of caching" — they are shapes that gain nothing
+from a cache anyway, being freshly mounted each iteration. **The cost of
+re-read-intensive work relative to the cache-active state remains unmeasured.** Work
+that reads the same file repeatedly turns a RAM cache hit in the active state into a
+network round trip each time, but on a local hypervisor link a small-file round trip
+is under a millisecond, so it is judged to have no practical impact on source and
+document work.
 
-남는 것은 메타데이터 stale(stat 의 크기·mtime, 상한 ~29s)인데, mtime 민감 도구(빌드)는
-게스트에서 돌므로 수용한다.
+What remains is metadata staleness (size and mtime from stat, ceiling ~29s), and
+that is accepted because mtime-sensitive tools (builds) run on the guest.
 
-### 기각: `nomdatacache` (클라이언트 메타 캐시 차단)
+### Rejected: `nomdatacache` (blocking the client metadata cache)
 
-내용 일관성에는 불필요하고(`nodatacache` 단독으로 충분), 비용이 치명적이다: 트리 열거
-6.6→28.5s (4.3배), node_modules 열거 62.7→154.8s (2.5배). `stat()` 왕복이 지배하는 모든
-작업이 이 배율을 먹는다. 메타 stale 상한 ~29s 를 지우자고 낼 값이 아니다.
+Unnecessary for content consistency (`nodatacache` alone suffices) and fatally
+expensive: tree enumeration 6.6 -> 28.5s (4.3x), node_modules enumeration
+62.7 -> 154.8s (2.5x). Every workload dominated by `stat()` round trips pays that
+multiplier. Not a price worth paying to erase a metadata staleness ceiling of ~29s.
 
-### 기각: `kernel oplocks = yes` (서버측)
+### Rejected: `kernel oplocks = yes` (server-side)
 
-"Linux 로컬 쓰기가 F_SETLEASE 경유로 break 를 유발해, 캐시를 켠 채 일관성을 얻는다"는
-가설로 검증했다. **SMB2/3 lease 클라이언트에는 그 경로가 성립하지 않는다**:
+Tested on the hypothesis that "a Linux local write triggers a break via F_SETLEASE,
+giving consistency with the cache left on". **That path does not hold for SMB2/3
+lease clients**:
 
-- `man smb.conf`: `smb2 leases` 는 `oplocks = yes` **그리고 `kernel oplocks = no`**
-  에서만 유효하다. 즉 이 옵션은 lease 를 전면 봉쇄한다. Level II oplock 도 함께 죽는다.
-- 실측: 격리 공유(`kernel oplocks = yes` 만 다르게 둔 동일 path 공유)에서 맥이 받은
-  것은 `LEASE()` — **빈 lease** 다. 캐싱 권리가 0 이므로 smbd 가 지킬 것도 없고,
-  **커널 lease 도 걸리지 않는다** (열린 핸들 유지 중 `/proc/locks` 0건).
-- 결과적으로 실효는 "커널 break 경로 추가"가 아니라 **그 공유 모든 클라이언트의 캐싱
-  몰수**다. 비용 방향은 `nomdatacache` 초과(캐싱 자체가 없음), 적용 단위는 공유 전체.
-  `nodatacache` 가 같은 일관성을 클라이언트 단위·측정 비용 0 으로 얻으므로 열위다.
-- 부수 확인: 우려했던 게스트 로컬 `open()` 의 break 대기(`fs.lease-break-time` 45s)는
-  같은 이유로 발생하지 않는다 — 깰 lease 가 없다 (open 지연 실측 0.0ms).
-- (S) 파라미터라 공유별 격리는 성립한다 — 격리 공유는 빈 lease, 운영 공유는 `LEASE(RH)`
-  정상 부여를 동시에 관측했다.
+- `man smb.conf`: `smb2 leases` is effective only with `oplocks = yes` **and
+  `kernel oplocks = no`**. That is, this option blocks leases entirely. Level II
+  oplocks die with them.
+- Measured: on an isolated share (the same path, differing only in
+  `kernel oplocks = yes`) what the Mac received was `LEASE()` — **an empty lease**.
+  With zero caching rights there is nothing for smbd to protect, and **no kernel
+  lease is taken either** (0 entries in `/proc/locks` while a handle was held open).
+- The net effect is therefore not "an added kernel break path" but **confiscation of
+  caching for every client of that share**. The cost direction exceeds
+  `nomdatacache` (there is no caching at all) and the unit of application is the
+  whole share. `nodatacache` obtains the same consistency per client at a measured
+  cost of zero, so this is strictly worse.
+- Incidental confirmation: the feared break wait on a guest-local `open()`
+  (`fs.lease-break-time` 45s) does not occur, for the same reason — there is no
+  lease to break (measured open delay 0.0ms).
+- Being an (S) parameter, per-share isolation does hold — an empty lease on the
+  isolated share and a normal `LEASE(RH)` on the production share were observed at
+  the same time.
 
 ---
 
-## 에러 코드 지도
+## The error code map
 
-| 증상 | 의미 | 조치 |
+| Symptom | Meaning | Action |
 |---|---|---|
-| `ls: ...: Operation not permitted` | TCC 의 `readdir` 거부 (층 3) | **무시 — 기능 정상.** `open()` 은 이미 발생했다 |
-| `umount: unmount(...): Operation not permitted` | 데몬 컨텍스트의 언마운트 거부 (층 4-b) | `diskutil` 이 1단계이므로 훅에서는 나오지 않는다. **나온다면 diskutil 이 먼저 실패했다는 뜻 — 조사 대상** |
-| `Permission denied` (EACCES) | root 소유 마운트 (층 4) | 자동 교정. 수동은 `smbfix` |
-| mount 라인에 `mounted by` 없음 | root 마운트 | 상동 |
-| mount 라인의 `//계정@호스트/공유` | **SMB 인증 계정 표기일 뿐, 마운트 소유자가 아니다** | 소유자 판정은 `mounted by` 필드로만 |
-| 게스트가 쓴 파일을 맥이 옛 내용으로 읽음 (에러 없음) | 층 7 — 캐시된 파일의 무기한 stale | 채집 절차(층 7) 후 `smbcontrol all reload-config`. 항구 처방은 `nodatacache` |
-| `No locks available` (ENOLCK) | automountd 마운트 실패 | 맵 자격증명 → 시계 순으로 확인 |
-| `Too many users` (EUSERS) | 맥 커널 smbfs 세션 잔재 고착 | 알려진 유일한 해법은 서버 재부팅 |
-| Finder `오류 코드 -8062` | 부수 파일 쓰기 실패로 복사 전체 중단 (층 5) | 아래 진단으로 **실패 경로를 실명으로** 확보 |
-| 흐린 폴더 + 재개(⟳), 내부 파일 600 | -8062 중단 후 CopyEngine 이 최종 권한을 입히지 못한 상태 | 고장이 아니라 미완의 흔적. 재개하지 말고 `rm -rf` 후 재복사 |
-| 있는 파일을 덮어쓸 때만 `ENOENT` | 공유 루트 이름 충돌 (층 6) | 그 파일의 basename 이 공유 루트 엔트리명과 같은지 확인. 공유 루트를 워크스페이스 상위로 |
-| `could not write config file .../.git/config` | 상동 — `.git/config` 가 걸린 경우 | `.git/config` 손상 여부를 함께 확인(`fatal: bad config line N`) |
-| `ENOENT: rename '<파일>.tmp.NNN' -> '<파일>'` | 상동 — 원자적 저장을 쓰는 편집기·도구 | 간헐이 아니라 결정적이다. 대상 basename 을 볼 것 |
+| `ls: ...: Operation not permitted` | TCC denying `readdir` (Layer 3) | **ignore — functionally fine.** `open()` has already happened |
+| `umount: unmount(...): Operation not permitted` | unmount refused in a daemon context (Layer 4b) | `diskutil` is stage 1, so it does not appear from the hook. **If it does, diskutil failed first — investigate** |
+| `Permission denied` (EACCES) | root-owned mount (Layer 4) | remediated automatically. Manually, `smbfix` |
+| no `mounted by` in the mount line | a root mount | as above |
+| `//account@host/share` in the mount line | **just the SMB authentication account, not the mount owner** | determine ownership from the `mounted by` field alone |
+| the Mac reads old content for a file the guest wrote (no error) | Layer 7 — indefinite staleness of a cached file | run the collection procedure (Layer 7), then `smbcontrol all reload-config`. The permanent remedy is `nodatacache` |
+| `No locks available` (ENOLCK) | automountd mount failure | check the map credentials, then the clock |
+| `Too many users` (EUSERS) | wedged leftover smbfs sessions in the macOS kernel | the only known cure is rebooting the server |
+| Finder `error code -8062` | an incidental file write failure aborting the whole copy (Layer 5) | use the diagnosis below to get **the failing path by name** |
+| a dimmed folder with a resume arrow, files inside at 600 | the state after a -8062 abort where the CopyEngine could not apply final permissions | not a fault but the trace of something unfinished. Do not resume — `rm -rf` and copy again |
+| `ENOENT` only when overwriting an existing file | share root name collision (Layer 6) | check whether that file's basename matches an entry name at the share root. Raise the share root above the workspace |
+| `could not write config file .../.git/config` | as above — the case where `.git/config` is caught | check `.git/config` for damage as well (`fatal: bad config line N`) |
+| `ENOENT: rename '<file>.tmp.NNN' -> '<file>'` | as above — editors and tools using atomic saves | not intermittent but deterministic. Look at the destination basename |
 
-**-8062 의 1차 증거 채집** — Finder 대화상자는 경로를 알려주지 않는다:
+**Collecting primary evidence for -8062** — the Finder dialog does not tell you the
+path:
 
 ```bash
 log stream --predicate 'subsystem == "com.apple.DesktopServices"' --info
-# 재현하면:  Error -8062 at path: <경로> on write
+# on reproduction:  Error -8062 at path: <path> on write
 ```
 
 ---
 
-## 이 모델을 읽는 법
+## How to read this model
 
-층이 8개인 것은 증상이 7가지라는 뜻이 아니다. **같은 증상("파일이 안 보인다", "복사가
-안 된다", "저장이 안 된다")이 8개 원인에서 나온다**는 뜻이다. 그래서 판정을 1차 증거로 해야 한다 —
-mount 테이블, 에러 코드, 저널, DiskArbitration 로그.
+Eight layers does not mean seven distinct symptoms. It means **the same symptoms
+("the file is not there", "the copy does not work", "it will not save") come from 8
+different causes.** That is why determination has to rest on primary evidence — the
+mount table, error codes, the journal, the DiskArbitration log.
 
-관련 문서: [decisions.md](decisions.md) 의 설계 원칙 29개는 이 모델을 규명하는 과정에서
-얻은 것이다. [operations.md](operations.md) 에 각 층의 관찰 채널이 정리되어 있다.
+Related: the 29 design principles in [decisions.md](decisions.md) were all obtained
+in the course of working this model out. [operations.md](operations.md) lists the
+observation channel for each layer.
