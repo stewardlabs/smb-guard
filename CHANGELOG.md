@@ -7,7 +7,7 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
-## [Unreleased]
+## [1.1.0] — 2026-08-17
 
 ### Added
 
@@ -155,11 +155,24 @@ changing its meaning, and moving a deployment path, are major changes.
 
 ### Compatibility
 
-Both configuration keys are **optional** and fall back to the previous behaviour
+**A 1.0.0 configuration file still works unchanged — this is a minor release.**
+Both new configuration keys are optional and fall back to the previous behaviour
 when unset (`SMBG_EXPORT_ROOT` -> `SMBG_GUEST_ROOT`, `SMBG_SHARE_SUBPATH` -> none).
 The second argument of `mac-cruft-cleanup` is optional too, and the shallow sweep
 is skipped when it equals the first.
-A 1.0.0 configuration file therefore still works — this is a minor change.
+
+Two changes fall outside the compatibility unit (the configuration file and the
+deployment paths) but are worth knowing about before upgrading:
+
+- **Log strings are now English.** Anything parsing `/var/log/smb/smb-guard.log`
+  by its message text needs updating. The tags (`[watch]`, `[ensure]`,
+  `[wakeup +Ns]`, `[smbfix]`) and the `state=` values (`HEALTHY`, `ABSENT`,
+  `FOREIGN`) are unchanged. Re-run `./install.sh` for the deployed copies to carry
+  the new strings; until then `tools/doctor.sh` correctly reports drift against the
+  repo.
+- **`tools/cleanup.sh` now requires an owner account**, via `--owner <account>` or
+  `SMBG_OWNER` in the configuration. It is not a deployment target and exists only
+  to migrate away from a v13 layout, so this affects no installed system.
 
 ---
 
