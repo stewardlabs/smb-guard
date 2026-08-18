@@ -7,6 +7,46 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.2.0] — 2026-08-18
+
+### Added
+
+- **Layer 8 registered in the failure model: client permission writes are applied
+  verbatim, with no server-side floor** — the Archive Utility chmods the
+  destination directory it has just created to 0644 over SMB and its extraction
+  dies against it ("Error 1 - Operation not permitted"), leaving a dimmed folder.
+  The wire-level capture shows the client requesting a **file** mode for a
+  **directory** (`MS NFS chmod request ..., 0644`); every server-side floor
+  candidate was measured out — the masks act at creation only, the force
+  parameters do not reach this path even on a fresh session, the `security mask`
+  family was removed in 4.11, and `fruit:nfs_aces = no` does not gate the modify
+  path. A mode-0000 object is unrecoverable from the client (every open is
+  denied) while any surviving owner bit allows `chmod u+rwX` recovery; everyday
+  0600/0700 guest artefacts are unaffected (measured). The remedy is
+  operational: CLI extraction (`ditto`/`unzip`), a documented recovery, and the
+  doctor section below.
+  The measurement ledger is `docs/history/layer8-client-permission-writes.md`
+- `tools/doctor.sh`: **'guest samba invariants' section** — asserts, against the
+  *running* guest configuration (`testparm` over ssh), the invariants whose loss
+  silently reopens settled layers: no `veto files` (Layer 5), the `vfs objects`
+  chain, `fruit:metadata = stream`, `fruit:veto_appledouble = no`,
+  `fruit:resource = file`, `store dos attributes` not overridden to `No`, and
+  the share path (Layer 6). Invariants rather than a whole-file diff, because
+  the guest Samba configuration is deliberately merge-deployed
+
+### Changed
+
+- `guest/samba/smb.conf.in`: the `fruit:nfs_aces` comment corrected — it promised
+  protection against the Finder's chmod misbehaviour that the option does not
+  deliver on the modify path (measured, 4.23.6). Registered in open-questions.md
+  with its resume condition. Nothing functional changes
+- Layer count references updated to 9 (README, CLAUDE.md, failure-model.md)
+
+### Fixed
+
+- The closing sentence of failure-model.md said "Eight layers does not mean seven
+  distinct symptoms" — a miscount, now nine against nine
+
 ## [1.1.0] — 2026-08-17
 
 ### Added

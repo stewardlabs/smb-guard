@@ -44,6 +44,13 @@
 #      set. The client mounts a subdirectory of the share, so the layout it sees is
 #      unchanged. Details and measurements in docs/failure-model.md.
 #
+# One 2026-08-18 correction:
+#
+#   5) fruit:nfs_aces comment corrected — measured (4.23.6): the option does not
+#      gate the modify path, and no mask or force parameter floors a client mode
+#      write. Registered as failure-model Layer 8. Nothing functional changes in
+#      this file.
+#
 # Operational contract: if cruft becomes a problem again, **fix the cleanup side.**
 #            Restoring veto is a reintroduction of -8062.
 #            Put nothing but the workspace at the share root — any name that
@@ -113,6 +120,9 @@
    create mask = 0644
    directory mask = 0755
 
+# The masks act at creation only. Nothing here floors a mode the client sets
+# afterwards — a client chmod lands verbatim (failure-model.md Layer 8).
+
 # When no, DOS attributes get mapped onto the execute bit and pollute it.
    store dos attributes = yes
 
@@ -142,7 +152,10 @@
 # back to yes.
    fruit:veto_appledouble = no
 
-# Prevents misbehaviour from the Finder's chown/chmod attempts
+# Intended to stop the Finder's chown/chmod misbehaviour. Measured on 4.23.6: it
+# does NOT gate the modify path — a client mode write (`MS NFS chmod request`)
+# lands verbatim with this set to no (failure-model.md Layer 8, open-questions.md).
+# Kept for the query side and as recorded intent.
    fruit:nfs_aces = no
 
 #--- No veto (v17) -------------------------------------------------------------

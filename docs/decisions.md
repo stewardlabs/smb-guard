@@ -262,6 +262,27 @@ conditions for reconsidering in open-questions.md.
 
 ---
 
+### Remedy client permission writes operationally, not in the Samba configuration
+
+The Archive Utility chmods the destination directory it has just created to 0644
+over SMB and its extraction dies against it (failure-model.md Layer 8). Every
+server-side candidate for flooring such a write was measured out: the masks act at
+creation only, the force parameters do not reach the security-descriptor path
+(confirmed on a fresh session), the `security mask` family no longer exists
+(removed in 4.11), and `fruit:nfs_aces = no` — whose comment in this repository's
+own template promised exactly this protection — does not gate the modify path.
+
+The remedy adopted is operational: archives are extracted with CLI tools
+(`ditto`/`unzip`), recovery is a documented `chmod` (client-side while any owner
+bit remains, guest-side for the 0000 class), and doctor.sh asserts the guest Samba
+invariants so a drifted configuration cannot silently reopen the settled layers.
+`nt acl support = no` — the one candidate that would cut the channel itself — was
+deliberately not adopted: it would also take down every intentional mode change
+from the Mac (`chmod +x` included), and that collateral has not been measured. It
+stays in open-questions.md with its resume condition.
+
+---
+
 ## Design principles
 
 These were all obtained in the course of working out the failure model. The order is

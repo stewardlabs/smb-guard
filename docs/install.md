@@ -302,6 +302,10 @@ Do not do the last one with `grep -i veto` — it would match
 `fruit:veto_appledouble = no` because of the name, but that line is not a block; it
 **lifts** one, and it must stay.
 
+`tools/doctor.sh` asserts the full invariant set against the running guest
+configuration (the 'guest samba invariants' section) — the grep above is the quick
+manual form.
+
 ### 9. Finder copy (confirming Layer 5 is resolved)
 
 ```bash

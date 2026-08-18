@@ -29,7 +29,7 @@ stop matching the GitHub PR pages. `CHANGELOG.md` is the English-language record
 
 ## Terminology
 
-Use these renderings consistently. The 8-layer failure model is cross-referenced
+Use these renderings consistently. The 9-layer failure model is cross-referenced
 across every document and several code comments, so a drifting term silently breaks
 those references. This table is also the bridge between the Korean `docs/history/`
 and the English documents.

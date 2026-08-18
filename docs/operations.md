@@ -106,6 +106,22 @@ defaults read com.apple.desktopservices DSDontWriteNetworkStores                
 not use it as grounds for "it is set, so they will not appear" — a file already
 present in the source is outside the suppression's remit.
 
+### Archive extraction failures (Error 1) and permission wreckage
+
+The Archive Utility chmods its own destination directory to 0644 on an SMB volume
+and aborts (Layer 8). Do not use it on the mount — `ditto -xk <archive> <dest>`
+and `unzip` extract correctly.
+
+```bash
+# a dimmed folder it left behind — recover from the Mac
+chmod u+rwX '<folder>'
+```
+
+The mode-0000 class (every open denied — Layer 8) is recoverable only on the
+guest: `find <workspace> -perm 0` to detect, `chmod -R u+rwX` to free. The chmod
+channel itself is visible at `log level = 10` in the smbd log as
+`MS NFS chmod request`.
+
 ### Guest
 
 ```bash
