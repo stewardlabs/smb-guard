@@ -21,7 +21,7 @@ single most common misjudgement in this system.
 | steps while awake | `journalctl -u chrony \| grep -i stepped` | **0.** Its appearance means the resume step was late |
 | host clock health | `sntp time.apple.com`, monthly | tens of milliseconds. Being off by seconds means setting the guest wrong |
 | SMB session leaks | `sudo smbstatus -b` on the guest, once or twice a week | the session count is not monotonically increasing |
-| configuration survival | `sudo ./tools/doctor.sh` **right after a major OS upgrade** | exit code 0. An upgrade can revert the autofs trio to defaults, or reset BTM approval and leave a job "file present but not loaded" |
+| configuration survival | `sudo smb-guard-doctor` **right after a major OS upgrade** | exit code 0. An upgrade can revert the autofs trio to defaults, or reset BTM approval and leave a job "file present but not loaded" |
 
 ### When you have to look at the event source
 
@@ -51,7 +51,8 @@ log show --last 24h \
 ### Host
 
 ```bash
-sudo ./tools/doctor.sh     # configuration survival check — read-only, sweeps everything at once
+sudo smb-guard-doctor      # configuration survival check — read-only, sweeps everything at once
+                           # (deployed copy; ./tools/doctor.sh is the same tool run from the repo)
 smb-guard --state          # side-effect-free state query (no root needed)
 mount | grep <mount point> # ownership is determined by the `mounted by` field alone
 tail -50 /var/log/smb/smb-guard.log
@@ -110,7 +111,7 @@ present in the source is outside the suppression's remit.
 
 **This class should no longer occur** — the chmod channel it rides is disarmed
 server-side (`fruit:nfs_aces = no` in `[global]`, Layer 8, adopted 2026-08-19).
-If it appears anyway, the invariant was lost: run `tools/doctor.sh` and check
+If it appears anyway, the invariant was lost: run `smb-guard-doctor` and check
 the guest configuration before anything else.
 
 While the channel is armed (invariant lost, or deliberately reverted): the

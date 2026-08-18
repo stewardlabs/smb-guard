@@ -262,7 +262,7 @@ conditions for reconsidering in open-questions.md.
 
 ---
 
-### Remedy client permission writes operationally, not in the Samba configuration
+### Client permission writes — remedied operationally, then superseded by a server-side fix
 
 The Archive Utility chmods the destination directory it has just created to 0644
 over SMB and its extraction dies against it (failure-model.md Layer 8). Every
@@ -284,15 +284,27 @@ in open-questions.md — every intentional mode change from the Mac rides the sa
 channel. Until that experiment runs, the operational remedy below stands
 unchanged.
 
-The remedy adopted is operational: archives are extracted with CLI tools
-(`ditto`/`unzip`), recovery is a documented `chmod` (client-side while any owner
-bit remains, guest-side for the 0000 class), and doctor.sh asserts the guest Samba
-invariants so a drifted configuration cannot silently reopen the settled layers.
-`nt acl support = no` — before the correction above, the one candidate that would
-cut the channel itself — was deliberately not adopted: it would also take down
-every intentional mode change from the Mac (`chmod +x` included), and that
-collateral has not been measured. It stays in open-questions.md, now as the
-second candidate behind a `[global]` `fruit:nfs_aces = no`.
+The remedy adopted at registration was operational: archives are extracted with
+CLI tools (`ditto`/`unzip`), recovery is a documented `chmod` (client-side while
+any owner bit remains, guest-side for the 0000 class), and doctor.sh asserts the
+guest Samba invariants so a drifted configuration cannot silently reopen the
+settled layers. `nt acl support = no` — before the correction above, the one
+candidate that would cut the channel itself — was deliberately not adopted: it
+would also take down every intentional mode change from the Mac (`chmod +x`
+included), and that collateral has not been measured.
+
+**Superseded 2026-08-19 (the experiment ran, same day):** the collateral was
+measured and accepted, and `fruit:nfs_aces = no` in `[global]` **is now the
+remedy** — every client mode write is silently ignored, the Archive Utility
+extraction simply succeeds, and the unrecoverable mode-0000 class cannot be
+created from the client. The operational procedures above are demoted to the
+fallback for a configuration where the channel is armed again; smb-guard-doctor
+asserts the invariant (scoped to `[global]` — a per-share line is exactly the
+no-op that hid this layer) and sweeps the git filemode operating contract the
+fix imposes. Measurements in failure-model.md Layer 8 and the Layer 8 ledger;
+the day-to-day consequences in operations.md 'git on the Mac — filemode'.
+`nt acl support = no` stays unadopted, now needed only for the
+ACL-accumulation case (open-questions.md 'Improvement candidates').
 
 ---
 

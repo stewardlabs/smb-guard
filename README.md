@@ -113,7 +113,8 @@ upgrade can revert the autofs configuration or reset Background Items approval,
 producing a state where the files are intact but the jobs are dead.
 
 ```bash
-sudo ./tools/doctor.sh
+sudo smb-guard-doctor       # deployed copy — works even with the mount down
+sudo ./tools/doctor.sh      # the same tool, run in place from the repo
 ```
 
 You can place everything by hand instead of using the install script —
