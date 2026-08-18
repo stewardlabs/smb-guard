@@ -137,6 +137,12 @@ operational consequences:
 
 - **Mode changes (`chmod +x` included) are made on the guest.** The Mac's exit 0
   means nothing landed.
+- **Authoring a new executable from the Mac needs an explicit index mode.** A
+  Mac-side `git add` records 100644 whatever the intent (filemode is off there,
+  and a Mac-side `chmod +x` lands nowhere), so either run
+  `git update-index --chmod=+x <file>` before committing (measured: the index
+  entry goes 100644 -> 100755), or create the file on the guest, `chmod +x`
+  there, and let a guest-side `git add` pick the mode up.
 - **git must ignore modes on the Mac, and only there.** With `core.filemode =
   true`, every tracked file shows a phantom `100644 => 100755`. The deployed
   mitigation: each workspace repository's repo-local `core.filemode` is unset
