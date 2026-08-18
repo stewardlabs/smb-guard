@@ -87,6 +87,25 @@ production mount is stale too, that refutes it.
 
 ## Unconfirmed
 
+### `fruit:nfs_aces = no` does not gate the modify path
+
+With the option set to `no`, smbd accepted and applied a client mode write —
+`MS NFS chmod request ... 0644` in the debug log, and the directory's mode changed
+(4.23.6, measured during the Layer 8 capture). The manual reads "whether support
+for querying and modifying the UNIX mode ... is enabled", so either the set path
+has lost its guard (a defect to report upstream) or the semantics are narrower
+than documented. This matters beyond precision: the option's comment in
+`guest/samba/smb.conf.in` promised protection against exactly the Finder's chmod
+misbehaviour, and that protection does not exist.
+
+Resume condition: read `check_ms_nfs()` in `source3/modules/vfs_fruit.c` for the
+guard; report upstream if it is a defect. If a genuine block ever exists (a fixed
+`nfs_aces`, or `nt acl support = no`), first measure the collateral — every
+intentional mode change from the Mac, `chmod +x` included, rides the same channel
+and dies with it — and then re-run the Archive Utility end-to-end: with its chmod
+ignored, the extraction may simply succeed, which would upgrade Layer 8's remedy
+from operational avoidance to a server-side fix.
+
 ### When the Layer 6 fix gets backported
 
 The identity of the defect and the fixing commit are settled (failure-model.md
@@ -150,7 +169,9 @@ If it recurs, determine it with the clock in a healthy state.
   every 15 minutes could become a burden. Excluding build artefacts currently
   removes 97% of the traversal.
 - **Considering `nt acl support = no`** — for cases where POSIX ACLs (`+`)
-  accumulate through SMB.
+  accumulate through SMB. It is also the only candidate left standing against
+  Layer 8's client permission writes — see 'fruit:nfs_aces' under Unconfirmed for
+  the collateral that must be measured first.
 
 ---
 

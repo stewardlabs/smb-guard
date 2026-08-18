@@ -1,6 +1,6 @@
 # Failure model
 
-The ways a working directory mounted over SMB breaks are organised into 8 layers.
+The ways a working directory mounted over SMB breaks are organised into 9 layers.
 Each layer **manifests independently**, and their symptoms resemble each other
 closely enough to invite misdiagnosis. The remedy differs per layer too.
 
@@ -617,6 +617,84 @@ lease clients**:
 
 ---
 
+## Layer 8 — Client permission writes are applied verbatim, with no server-side floor
+
+**A mode the client asks for is exactly what the server applies — the masks, the
+force parameters and `fruit:nfs_aces = no` all stand aside — and a macOS client
+does ask for destructive ones.** The headline case: the Archive Utility kills its
+own extraction target and aborts with "Error 1 - Operation not permitted", leaving
+a dimmed, unusable folder.
+
+Measured 2026-08-18 (macOS 26.6, Archive Utility 10.15/176.6.1, Samba
+4.23.6-Ubuntu). The wire-level sequence was captured with `smbcontrol all debug 10`
+during a live reproduction; the measurement ledger is
+`history/layer8-client-permission-writes.md`.
+
+### The Archive Utility sequence
+
+| Step | Request (from the debug log) | Server result |
+|---|---|---|
+| helper and temp directories | `MS NFS chmod request ..., 0700` | 0700 — fine |
+| extracted files, into the temp directory | create, then `chmod 0600` (the archive's modes) | 0600 — fine |
+| the final directory | mkdir — `unix_mode(...) returning 0755` | 0755 — fine |
+| **the final directory, again** | **`MS NFS chmod request ..., 0644`** | **0644 — a directory with no execute bit** |
+| moving the files into place | rename source opened with DELETE (`0x10000`) | `NT_STATUS_ACCESS_DENIED`, repeatedly |
+
+The client requests a **file** mode for a **directory** it is about to fill. From
+that point the folder cannot be entered or written (`drw-r--r--`), the move phase
+dies, and the utility aborts. The same archive extracts cleanly on local APFS (the
+final directory ends up 0700), so the 0644 request is specific to the Archive
+Utility's network-volume path. Isolated reproduction: `mv` a file into a 0644
+directory over the mount fails with `Permission denied`.
+
+### What does not stop it (all measured)
+
+| Candidate | Result |
+|---|---|
+| `create mask` / `directory mask` | not applied — the masks act at creation, this mode arrives afterwards |
+| `force create mode` / `force directory mode` | not applied — confirmed after a reload **and on a fresh session** |
+| the `security mask` family | removed in Samba 4.11 — `Unknown parameter` in 4.23 |
+| `fruit:nfs_aces = no` | **does not gate the modify path** — the log shows `MS NFS chmod request` accepted and applied with the option set (see open-questions.md) |
+
+There is no server-side floor for a client mode write in current Samba. The chmod
+channel macOS uses (mode bits carried in the security descriptor) lands verbatim.
+
+### The recoverable and the unrecoverable
+
+SMB is handle-based: every operation — a mode change and a rename included — first
+opens the target, and the open is checked against the target's current mode. That
+draws a hard line at exactly zero:
+
+| Mode left behind | From the Mac |
+|---|---|
+| any owner bit set (0644, 0600, 0700, 0400, ...) | recoverable — `chmod u+rwX` opens it back up; traversal, rename and delete follow |
+| exactly 0000 | **unrecoverable** — every open is denied, so chmod, rename and delete all fail. Only a `chmod` on the guest can free it |
+
+Everyday traffic is unaffected: files and directories the guest creates with
+0600/0700 (umask 077) rename, move and delete normally from the Mac (measured).
+POSIX `chmod` and `unlink` need no access bits on the target itself — this trap is
+SMB-specific.
+
+### Remedy: extract with CLI tools, recover with chmod
+
+The client cannot be fixed and the server offers no floor, so the remedy is
+operational:
+
+- **Do not extract archives with the Archive Utility on the mount.** `ditto -xk
+  <archive>.zip <dest>` and `unzip` both extract correctly (measured) — they create
+  the destination with sane modes before writing into it.
+- A dimmed folder left behind: `chmod u+rwX <folder>` from the Mac, then use or
+  remove it.
+- A mode-0000 object: `chmod -R u+rwX` **on the guest**.
+- Detection sweep for the unrecoverable class: `find <workspace> -perm 0` on the
+  guest.
+
+Whether the chmod channel can be genuinely disabled — and whether the Archive
+Utility would then survive its own chmod being ignored — is an open question
+(open-questions.md).
+
+---
+
 ## The error code map
 
 | Symptom | Meaning | Action |
@@ -634,6 +712,8 @@ lease clients**:
 | `ENOENT` only when overwriting an existing file | share root name collision (Layer 6) | check whether that file's basename matches an entry name at the share root. Raise the share root above the workspace |
 | `could not write config file .../.git/config` | as above — the case where `.git/config` is caught | check `.git/config` for damage as well (`fatal: bad config line N`) |
 | `ENOENT: rename '<file>.tmp.NNN' -> '<file>'` | as above — editors and tools using atomic saves | not intermittent but deterministic. Look at the destination basename |
+| Archive Utility "Error 1 - Operation not permitted", a dimmed folder left behind | the utility chmodded its own destination directory to 0644 (Layer 8) | `chmod u+rwX` the folder from the Mac. Extract with `ditto`/`unzip` instead |
+| every operation on one object fails with EACCES, even as its owner | mode 0000 over SMB — every open is denied (Layer 8) | `chmod` on the guest. From the client it is unrecoverable |
 
 **Collecting primary evidence for -8062** — the Finder dialog does not tell you the
 path:
@@ -647,8 +727,8 @@ log stream --predicate 'subsystem == "com.apple.DesktopServices"' --info
 
 ## How to read this model
 
-Eight layers does not mean seven distinct symptoms. It means **the same symptoms
-("the file is not there", "the copy does not work", "it will not save") come from 8
+Nine layers does not mean nine distinct symptoms. It means **the same symptoms
+("the file is not there", "the copy does not work", "it will not save") come from 9
 different causes.** That is why determination has to rest on primary evidence — the
 mount table, error codes, the journal, the DiskArbitration log.
 

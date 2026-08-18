@@ -70,6 +70,8 @@ fi
 : "${SMBG_SHARE_SUBPATH:=}"
 : "${SMBG_LABEL_PREFIX:=io.stewardlabs}"
 : "${SMBG_LOGDIR:=/var/log/smb}"
+: "${SMBG_GUEST_ROOT:=}"
+: "${SMBG_EXPORT_ROOT:=}"
 SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
 
 GUARD_LABEL="$SMBG_LABEL_PREFIX.smb-guard"
@@ -343,6 +345,74 @@ if [ -n "$ssh_ctx" ]; then
                 ok "guest ssh OK (owner context — the root context is checked when run under sudo)"
             fi ;;
     esac
+fi
+
+# ── 5b. Guest Samba invariants — drift here reopens settled layers ─────────
+# The guest smb.conf is deliberately merge-deployed (decision 'Do not deploy the
+# guest Samba configuration automatically'), so a whole-file diff would flag
+# legitimate manual merges. Instead, the invariants whose loss silently reopens a
+# documented failure layer are asserted against the *running* configuration
+# (testparm on the guest). Value spelling follows testparm's normalisation
+# (module parameters echo verbatim and lowercase; parameters left at their
+# default are omitted, which is why 'store dos attributes' is checked as a
+# forbidden negative rather than a required positive).
+section "guest samba invariants (testparm on $SMBG_HOST)"
+
+TP=""
+if [ -z "$ssh_ctx" ]; then
+    skip "guest samba invariants (no ssh context)"
+elif [ -z "$ssh_out" ]; then
+    skip "guest samba invariants (guest ssh failed above)"
+else
+    if [ "$ssh_ctx" = "root->owner" ]; then
+        TP="$(sudo -u "$SMBG_OWNER" -H ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" 'testparm -s 2>/dev/null')"
+    else
+        TP="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" 'testparm -s 2>/dev/null')"
+    fi
+    if [ -z "$TP" ]; then
+        skip "guest samba invariants (testparm produced no output on the guest)"
+    elif ! printf '%s\n' "$TP" | grep -q "^\[$SMBG_SHARE\]"; then
+        fail "share [$SMBG_SHARE] missing from the running guest configuration" \
+             "sudo ./guest/install.sh --samba, or merge guest/samba/smb.conf.in"
+    else
+        ok "share [$SMBG_SHARE] present"
+        inv_require() {   # <exact configuration line> <what breaks without it>
+            if printf '%s\n' "$TP" | grep -qF "$1"; then
+                ok "$1"
+            else
+                fail "'$1' missing from the running guest configuration — $2" \
+                     "merge guest/samba/smb.conf.in or re-run sudo ./guest/install.sh --samba"
+            fi
+        }
+        inv_require "vfs objects = catia fruit streams_xattr" \
+                    "macOS metadata falls back to ._* files and Finder interop degrades"
+        inv_require "fruit:metadata = stream" "FinderInfo falls back to ._* files"
+        inv_require "fruit:veto_appledouble = no" \
+                    "unpacking Mac ZIP archives fails on Mac clients (vfs_fruit(8))"
+        inv_require "fruit:resource = file" \
+                    "= stream would turn large resource forks into Layer 5-shaped write failures (ext4 xattr limit)"
+        exp_path="${SMBG_EXPORT_ROOT:-$SMBG_GUEST_ROOT}"
+        if [ -z "$exp_path" ]; then
+            skip "share path (no SMBG_EXPORT_ROOT/SMBG_GUEST_ROOT in the configuration)"
+        elif printf '%s\n' "$TP" | grep -qF "path = $exp_path"; then
+            ok "path = $exp_path"
+        else
+            fail "share path is not $exp_path — if it reverted to the workspace itself, Layer 6 name collisions return" \
+                 "check [$SMBG_SHARE] in the guest /etc/samba/smb.conf"
+        fi
+        if printf '%s\n' "$TP" | grep -qE '^[[:space:]]*veto files'; then
+            fail "veto files present — every Finder copy fails with -8062 (Layer 5)" \
+                 "remove it; cleanliness is mac-cruft-cleanup's job (guest/samba/smb.conf.in header)"
+        else
+            ok "no veto files"
+        fi
+        if printf '%s\n' "$TP" | grep -qF "store dos attributes = No"; then
+            fail "store dos attributes = No — DOS attributes get mapped onto the execute bits and pollute them" \
+                 "remove the override; the default (yes) is what the template intends"
+        else
+            ok "store dos attributes not overridden to No"
+        fi
+    fi
 fi
 
 # ── 6. Mount state ─────────────────────────────────────────────────────────

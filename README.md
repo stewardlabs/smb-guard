@@ -34,9 +34,16 @@ An SMB mount is not simply either "broken" or "attached". In between there are
   operation (error `-8062`). The dialog does not name the path that failed, which
   makes it easy to misdiagnose as a permissions or capacity problem.
 
+- **The Archive Utility kills its own extraction target** — on an SMB volume it
+  chmods the destination directory it has just created to 0644 (no execute bit)
+  and then cannot move the extracted files into it: "Error 1 - Operation not
+  permitted", and a dead dimmed folder is left behind. No Samba parameter floors
+  a client mode write. Extract with `ditto`/`unzip` instead; recover with
+  `chmod u+rwX`.
+
 All of them are the kind you cannot see without reading the logs. For the causal
 detail and the measurements see
-[docs/failure-model.md](docs/failure-model.md) — organised into 8 layers.
+[docs/failure-model.md](docs/failure-model.md) — organised into 9 layers.
 
 ## What it does
 
@@ -120,7 +127,7 @@ LaunchDaemon plist that is not will be refused by launchd.
 
 | Document | Contents |
 |---|---|
-| [docs/failure-model.md](docs/failure-model.md) | the 8-layer failure model and the error code map — **read this first** |
+| [docs/failure-model.md](docs/failure-model.md) | the 9-layer failure model and the error code map — **read this first** |
 | [docs/architecture.md](docs/architecture.md) | full composition, role split, design contracts |
 | [docs/install.md](docs/install.md) | installation and verification procedures, manual placement table |
 | [docs/operations.md](docs/operations.md) | what to observe, and the diagnostic tools |
