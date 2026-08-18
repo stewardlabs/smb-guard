@@ -717,6 +717,11 @@ The collateral, measured and accepted:
   (the synthetic mode carries x). The mitigation and its clone-time trap are in
   operations.md — repo-local `core.filemode` unset plus a Mac machine-local
   `includeIf` overlay, guest unaffected.
+- Anything that installs executables from the Mac inherits the same fate: a
+  `pnpm install` on the mount exits 0 but lands every file 0644, and the
+  `node_modules/.bin` shims will not spawn (EACCES/126). Measured; the break
+  surfaces at the next fresh install, not at adoption. Remedies in
+  operations.md 'Package managers writing executables (pnpm)'.
 
 The operational remedy stays documented as the fallback for a configuration
 where the channel is armed again (doctor.sh asserts the invariant; its loss is
@@ -748,6 +753,7 @@ how this layer would silently return):
 | `ENOENT: rename '<file>.tmp.NNN' -> '<file>'` | as above — editors and tools using atomic saves | not intermittent but deterministic. Look at the destination basename |
 | Archive Utility "Error 1 - Operation not permitted", a dimmed folder left behind | the utility chmodded its own destination directory to 0644 (Layer 8) — **should no longer occur**: the chmod channel is disarmed server-side | its appearance means the `fruit:nfs_aces` invariant was lost — run doctor.sh. Recover with `chmod u+rwX` from the Mac; extract with `ditto`/`unzip` meanwhile |
 | every operation on one object fails with EACCES, even as its owner | mode 0000 over SMB — every open is denied (Layer 8) — **should no longer occur**, as above | `chmod` on the guest (from the client it is unrecoverable), then run doctor.sh — the channel that wrote it is supposed to be disarmed |
+| `pnpm run`/`pnpm exec` dies with `spawn <bin> EACCES`, or a `node_modules/.bin` shim exits 126, right after an install on the mount | the install's modes rode the disarmed chmod channel (Layer 8) — everything landed 0644 | restore modes on the guest, or keep node_modules off the mount — operations.md 'Package managers writing executables (pnpm)' |
 
 **Collecting primary evidence for -8062** — the Finder dialog does not tell you the
 path:

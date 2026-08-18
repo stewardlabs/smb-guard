@@ -45,8 +45,12 @@ the repo unreachable (mount down) the drift comparisons skip rather than fail.
 Since 1.4.0 it also sweeps the Layer 8 git operating contract: repo-local
 `core.filemode` in any workspace repository (poisons the other side's mode
 judgement — written by every clone/init), and index-vs-worktree mode drift on
-the guest (the trace of a Mac-side checkout dropping x bits). Both are
-audit-only with the remedy printed, like everything else here.
+the guest (the trace of a Mac-side checkout dropping x bits). Since 1.5.0 a
+third sweep covers the case the drift sweep is blind to — an executable
+*authored* on the Mac is committed 100644 with index and worktree in agreement,
+so the residual signal is a shebang on an index-100644 file (a WARN: sourced
+and interpreter-invoked files legitimately stay 644). All are audit-only with
+the remedy printed, like everything else here.
 
 | Exit code | Meaning |
 |---|---|

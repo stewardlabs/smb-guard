@@ -471,15 +471,19 @@ fi
 
 # ── 7. Workspace git filemode — the Layer 8 operating contract ─────────────
 # With the NFS ACE channel disarmed (fruit:nfs_aces = no in [global]), git must
-# ignore modes on the Mac and judge them on the guest. Two state faults break
-# that split, and both are written by routine git use, not by configuration
+# ignore modes on the Mac and judge them on the guest. Three state faults break
+# that split, and all are written by routine use, not by configuration
 # drift — which is why they are swept here (audit only, remedies printed —
 # Principle 21):
 #   - a repo-local core.filemode (clone/init writes one on either side)
 #     poisons the *other* side's mode judgement;
 #   - a Mac-side checkout of an executable file drops its server x bit
 #     (the mode the checkout applies rides the disarmed channel), which the
-#     guest sees as index-vs-worktree mode drift.
+#     guest sees as index-vs-worktree mode drift;
+#   - an executable *authored* on the Mac is committed 100644 (a Mac-side
+#     `git add` cannot read a mode that never landed), which produces **no**
+#     drift — index and worktree agree on 644 — so the drift sweep is blind to
+#     it. The residual signal is a shebang on an index-100644 file.
 section "workspace git filemode (Layer 8 operating contract)"
 
 if [ -z "$mnt" ] || [ "${mnt#*mounted by $SMBG_OWNER}" = "$mnt" ]; then
@@ -522,6 +526,31 @@ else
         printf '%s\n' "$md" | sed 's/^/        /'
     else
         ok "no index-vs-worktree mode drift in guest repositories"
+    fi
+fi
+
+# A shebang does not prove the file is meant to run directly — sourced
+# libraries and interpreter-invoked scripts legitimately stay 100644 — so this
+# is a WARN that leaves the intent question with the operator, not a FAIL.
+if [ -z "$ssh_ctx" ] || [ -z "$ssh_out" ]; then
+    skip "shebang-vs-index-mode sweep (no guest ssh)"
+elif [ -z "$SMBG_GUEST_ROOT" ]; then
+    skip "shebang-vs-index-mode sweep (no SMBG_GUEST_ROOT in the configuration)"
+else
+    remote='for g in $(find '"$SMBG_GUEST_ROOT"' -maxdepth 4 -name .git 2>/dev/null); do d="${g%/.git}"; git -C "$d" ls-files -s 2>/dev/null | awk -F"\t" "{split(\$1,a,\" \"); if (a[1]==\"100644\") print \$2}" | while IFS= read -r p; do f="$d/$p"; [ -f "$f" ] || continue; head -c 2 "$f" 2>/dev/null | grep -q "^#!" && printf "%s:%s\n" "$d" "$p"; done; done; true'
+    if [ "$ssh_ctx" = "root->owner" ]; then
+        sb="$(sudo -u "$SMBG_OWNER" -H ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" "$remote")" || sb="__SSH_FAILED__"
+    else
+        sb="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" "$remote")" || sb="__SSH_FAILED__"
+    fi
+    if [ "$sb" = "__SSH_FAILED__" ]; then
+        skip "shebang-vs-index-mode sweep (guest ssh failed)"
+    elif [ -n "$sb" ]; then
+        warn "shebang files with index mode 100644 — authored on the Mac and meant to run directly? (sourced/interpreter-invoked files are fine as they are)" \
+             "if meant to run: git update-index --chmod=+x <path>, then chmod +x on the guest"
+        printf '%s\n' "$sb" | sed 's/^/        /'
+    else
+        ok "no shebang files with index mode 100644"
     fi
 fi
 

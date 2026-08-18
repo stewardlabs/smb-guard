@@ -137,12 +137,19 @@ operational consequences:
 
 - **Mode changes (`chmod +x` included) are made on the guest.** The Mac's exit 0
   means nothing landed.
-- **Authoring a new executable from the Mac needs an explicit index mode.** A
-  Mac-side `git add` records 100644 whatever the intent (filemode is off there,
-  and a Mac-side `chmod +x` lands nowhere), so either run
+- **Authoring a new executable from the Mac needs an explicit index mode — and
+  it is a two-step.** A Mac-side `git add` records 100644 whatever the intent
+  (filemode is off there, and a Mac-side `chmod +x` lands nowhere), so run
   `git update-index --chmod=+x <file>` before committing (measured: the index
-  entry goes 100644 -> 100755), or create the file on the guest, `chmod +x`
-  there, and let a guest-side `git add` pick the mode up.
+  entry goes 100644 -> 100755). That fixes **only the committed mode**: the
+  worktree copy on the server is still 644, so the file will not run in place
+  from either side until a guest-side `chmod +x`. (A fresh checkout elsewhere,
+  on a real filesystem, gets the right mode from the index — the second step
+  is for this worktree.) Authoring on the guest — create, `chmod +x`, and let
+  a guest-side `git add` pick the mode up — does both steps at once. A missed
+  authoring step produces no index-vs-worktree drift (both sides agree on
+  644), which is exactly why `smb-guard-doctor` sweeps shebang files whose
+  index mode is 100644 as a separate WARN.
 - **git must ignore modes on the Mac, and only there.** With `core.filemode =
   true`, every tracked file shows a phantom `100644 => 100755`. The deployed
   mitigation: each workspace repository's repo-local `core.filemode` is unset
@@ -182,6 +189,53 @@ mode governs nothing but the display. Two consequences:
 - After a guest-side `chmod +x`, the Mac may keep refusing execution until its
   attribute cache turns over — `touch` the containing directory from the Mac
   (the Layer 7 discipline) before concluding anything.
+
+### Package managers writing executables (pnpm) — Layer 8
+
+A Mac-side `pnpm install` on the mount **succeeds but produces a tool chain
+that cannot run.** Files are created with the server's mask defaults (0644) and
+the chmod the installer applies afterwards is a silent no-op, so every
+`node_modules/.bin` shim lands non-executable and the first spawn fails with an
+EACCES/126 that pnpm does not explain. Measured 2026-08-19 (pnpm 10.33, scratch
+package on the mount): install exit 0; shim a 0644 regular file on the server;
+direct invocation refused (126); `pnpm exec` dies with `spawn <bin> EACCES`.
+node_modules trees installed **before** the adoption keep their real modes and
+keep working — the break surfaces at the next fresh install or dependency
+update, not at adoption time.
+
+Remedies, in preference order:
+
+- **Restore modes on the guest after every install** (verified). From the
+  package root, on the guest:
+
+  ```bash
+  find node_modules -type f ! -perm -u+x -exec sh -c '
+    for f; do head -c 4 "$f" | LC_ALL=C grep -qP "^#!|^\x7fELF|^\xcf\xfa\xed\xfe|^\xca\xfe\xba\xbe" \
+      && chmod +x "$f"; done' _ {} +
+  ```
+
+  This covers the `.bin` shims and package bin scripts (shebang) and native
+  binaries (ELF for the guest, Mach-O magics for the Mac — universal and
+  arm64); plain files are left alone (all four classes verified against a
+  scratch install). `grep -P` is the guest's GNU grep — the sweep is
+  guest-side by construction, which is where it must run anyway.
+
+- **Keep node_modules off the mount** (verified for creation, traversal,
+  execution and write-through). A Mac-side `ln -s` on the mount works — the
+  server stores an emulated-symlink regular file, and the Mac traverses it —
+  so `node_modules` can be a symlink to a Mac-local (APFS) directory, where
+  modes are real, installs need no sweep, and I/O is local. The guest then
+  cannot use that node_modules — acceptable while web tooling is Mac-side.
+  Unverified: whether some future pnpm operation replaces the symlink with a
+  real directory, silently moving installs back onto the mount — check the
+  link after layout-changing operations.
+
+- **Installing from the guest is rejected.** pnpm is absent there (corepack
+  0.35 is available, so it is installable) — but the decisive point is that a
+  guest install resolves platform-specific native packages (esbuild, swc,
+  rollup, ...) for linux-arm64, so the Mac could not run the result anyway
+  without forcing both platforms via `supportedArchitectures` in every repo.
+  The cost lands in the wrong place.
 
 ### Guest
 
