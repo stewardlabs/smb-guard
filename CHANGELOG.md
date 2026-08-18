@@ -7,6 +7,34 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.5.0] — 2026-08-19
+
+### Added
+
+- **doctor: shebang-vs-index-mode sweep (WARN).** An executable authored on
+  the Mac is committed 100644 with **no** index-vs-worktree drift — index and
+  worktree agree on 644 — so the 1.4.0 drift sweep is blind to exactly the
+  authoring miss the prescription warns about. The residual signal, a shebang
+  on an index-100644 file, is swept on the guest and reported as a WARN with
+  the intent question left to the operator (sourced libraries and
+  interpreter-invoked scripts legitimately stay 644)
+- **operations.md: 'Package managers writing executables (pnpm)'.** Measured:
+  a Mac-side `pnpm install` on the mount exits 0 but lands every file 0644
+  (creation takes the server mask defaults; the installer's chmod is a silent
+  no-op), so the `.bin` shims die with EACCES/126 at first spawn — the break
+  surfaces at the next fresh install, not at adoption. Verified remedies: a
+  guest-side shebang/ELF/Mach-O mode-restore sweep (primary), or node_modules
+  as a Mac-local symlink off the mount; installing from the guest is rejected
+  (platform-native packages resolve for linux-arm64). failure-model.md Layer 8
+  collateral and the error map carry the new entries
+
+### Fixed
+
+- operations.md: the executable-authoring prescription is stated as the
+  two-step it really is — `git update-index --chmod=+x` fixes only the
+  committed mode, and the worktree copy still needs a guest-side `chmod +x`
+  to run in place
+
 ## [1.4.2] — 2026-08-19
 
 ### Fixed
