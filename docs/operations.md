@@ -157,6 +157,25 @@ workspace, run `git config --unset core.filemode` in the new repository.** Each
 side then falls back to its correct value (guest: built-in `true`; Mac: the
 overlay's `false`).
 
+**Execution follows the server's real mode — the display lies in both
+directions (measured):** a server-644 file shows `rwx------` on the Mac but is
+refused execution (126); a server-755 file executes normally. The synthetic
+mode governs nothing but the display. Two consequences:
+
+- **Any Mac-side rewrite of an executable file drops its server x bit** — a
+  checkout, a pull, an editor save: whatever recreates the file, since the mode
+  it would apply rides the disarmed channel. The file then refuses to run from
+  either side. This is not hypothetical: the first Mac-side `git pull` after
+  adoption did it to `tools/doctor.sh`, and the next editing session did it
+  again.
+  Recovery is one line **on the guest**: `git -C <repo> checkout -- <path>`
+  (the guest sees the damage as an index-vs-worktree mode diff; sweep with
+  `git diff --summary | grep 'mode change'`). `smb-guard-doctor` sweeps for
+  both this and stray repo-local `core.filemode` values.
+- After a guest-side `chmod +x`, the Mac may keep refusing execution until its
+  attribute cache turns over — `touch` the containing directory from the Mac
+  (the Layer 7 discipline) before concluding anything.
+
 ### Guest
 
 ```bash

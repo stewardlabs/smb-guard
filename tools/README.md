@@ -1,14 +1,18 @@
 # Diagnostic and historical tools
 
-**Not deployment targets.** The installer does not place them; run them from this
-directory.
+**Mostly not deployment targets** — run them from this directory. The one
+exception is `doctor.sh`, which host/install.sh also deploys as
+`/usr/local/sbin/smb-guard-doctor`: the mount's own doctor must not live only on
+the mount it diagnoses, and a script executed off the mount is exposed to the
+Layer 8 x-bit loss (a Mac-side pull that rewrites it leaves it non-executable —
+it happened to this very file).
 
 Two kinds are mixed here. **`doctor.sh` and `probe-rename-collision.sh` are in
 active use** — worth re-running whenever the configuration changes. The rest have
 finished their job; they are kept because the documentation cites their output as
 evidence, and deleting them would cut that evidence off.
 
-## `doctor.sh` (active)
+## `doctor.sh` (active — deployed as `smb-guard-doctor`)
 
 Survival check of the host (macOS) configuration. **Read-only** — it fixes nothing
 and only prints the remedy command for each item (Principle 21 — audit, but never
@@ -31,9 +35,18 @@ registration, guest ssh in a root context (the top-priority check), and the moun
 state.
 
 ```bash
-sudo ./doctor.sh                  # complete verdict (root)
+sudo smb-guard-doctor             # deployed copy — works with the mount down
+sudo ./doctor.sh                  # in place from the repo — complete verdict (root)
 ./doctor.sh                       # root-only items are marked as skipped
 ```
+
+The deployed copy finds the repo through `SMBG_REPO` in the configuration; with
+the repo unreachable (mount down) the drift comparisons skip rather than fail.
+Since 1.4.0 it also sweeps the Layer 8 git operating contract: repo-local
+`core.filemode` in any workspace repository (poisons the other side's mode
+judgement — written by every clone/init), and index-vs-worktree mode drift on
+the guest (the trace of a Mac-side checkout dropping x bits). Both are
+audit-only with the remedy printed, like everything else here.
 
 | Exit code | Meaning |
 |---|---|

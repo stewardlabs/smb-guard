@@ -37,7 +37,11 @@
 #       (distinguished from 0 so that the "silence" of skipped items is not read
 #       as healthy — Principle 25)
 #
-# usage: sudo ./doctor.sh [--config <path>]      # some items are skipped when not root
+# usage: sudo smb-guard-doctor [--config <path>]     # deployed copy (host/install.sh)
+#        sudo ./doctor.sh      [--config <path>]     # in place, from the repo
+# Some items are skipped when not root. The deployed copy exists so that the
+# mount's own doctor does not live on the mount it diagnoses; run it when the
+# workspace mount itself is in question.
 
 set -u
 
@@ -72,6 +76,7 @@ fi
 : "${SMBG_LOGDIR:=/var/log/smb}"
 : "${SMBG_GUEST_ROOT:=}"
 : "${SMBG_EXPORT_ROOT:=}"
+: "${SMBG_REPO:=}"
 SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
 
 GUARD_LABEL="$SMBG_LABEL_PREFIX.smb-guard"
@@ -87,6 +92,23 @@ OWNER_HOME="$(dscl . -read "/Users/$SMBG_OWNER" NFSHomeDirectory 2>/dev/null | a
 
 IS_ROOT=0
 [ "$(id -u)" -eq 0 ] && IS_ROOT=1
+
+# Repo location — this tool runs from two places: in place from the repo
+# (tools/doctor.sh) and deployed (/usr/local/sbin/smb-guard-doctor, so that the
+# mount's own doctor does not live on the mount it diagnoses). $0 wins when it
+# points inside a repo checkout; otherwise SMBG_REPO from the configuration.
+# The repo normally lives on the guarded mount, so an unreachable repo must not
+# read as a fault — repo-dependent items (the drift comparisons) skip instead
+# (Principle 25: a skip is not a pass). REPOD is a never-readable stand-in that
+# makes drift()'s own source check do the skipping.
+if [ -e "$ROOT/tools/doctor.sh" ] && [ -d "$ROOT/host/sbin" ]; then
+    REPO="$ROOT"
+elif [ -n "$SMBG_REPO" ] && [ -d "$SMBG_REPO/host/sbin" ]; then
+    REPO="$SMBG_REPO"
+else
+    REPO=""
+fi
+REPOD="${REPO:-/var/empty/smb-guard-repo-unresolved}"
 
 # ── Verdict output ─────────────────────────────────────────────────────────
 # skip means "not checked", not "healthy" — the exit code separates 0 from 2.
@@ -212,11 +234,20 @@ esac
 # ── 2. Deployed files — install-managed, blanket remedy is a reinstall ─────
 section "deployed files (the host/install.sh managed area)"
 
-check_file "$DEPLOY_CONF"                     root:wheel 644 && drift "$DEPLOY_CONF" "$ROOT/smb-guard.conf"
-check_file /usr/local/lib/smb-guard/common.sh root:wheel 644 && drift /usr/local/lib/smb-guard/common.sh "$ROOT/host/lib/common.sh"
+check_file "$DEPLOY_CONF"                     root:wheel 644 && drift "$DEPLOY_CONF" "$REPOD/smb-guard.conf"
+check_file /usr/local/lib/smb-guard/common.sh root:wheel 644 && drift /usr/local/lib/smb-guard/common.sh "$REPOD/host/lib/common.sh"
 for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix; do
-    check_file "/usr/local/sbin/$f" root:wheel 755 && drift "/usr/local/sbin/$f" "$ROOT/host/sbin/$f"
+    check_file "/usr/local/sbin/$f" root:wheel 755 && drift "/usr/local/sbin/$f" "$REPOD/host/sbin/$f"
 done
+# The doctor's own deployed copy. Missing is a WARN, not a FAIL — its absence
+# does not degrade the guarded system's function, it only means the next mount
+# failure has to be diagnosed from the repo copy on that same mount.
+if [ -e /usr/local/sbin/smb-guard-doctor ]; then
+    check_file /usr/local/sbin/smb-guard-doctor root:wheel 755 && drift /usr/local/sbin/smb-guard-doctor "$REPOD/tools/doctor.sh"
+else
+    warn "smb-guard-doctor not deployed" \
+         "re-run sudo ./host/install.sh (deploys tools/doctor.sh as /usr/local/sbin/smb-guard-doctor)"
+fi
 check_file "$GUARD_PLIST" root:wheel 644
 check_file "$WATCH_PLIST" root:wheel 644
 check_file "$NEWSYSLOG"   root:wheel 644
@@ -238,7 +269,7 @@ fi
 # Drift of rendered artefacts — a template and a deployed file cannot be compared
 # directly, so re-render with the same rules install.sh uses and compare. When the
 # substitution value (SW) could not be obtained, treat it as unmeasurable.
-if [ -n "$SW" ] && [ -r "$ROOT/host/LaunchDaemons/smb-guard.plist.in" ]; then
+if [ -n "$SW" ] && [ -r "$REPOD/host/LaunchDaemons/smb-guard.plist.in" ]; then
     STAGE="$(mktemp -d "${TMPDIR:-/tmp}/smb-guard-doctor.XXXXXX")"
     trap 'rm -rf "$STAGE"' EXIT
     render() {
@@ -247,9 +278,9 @@ if [ -n "$SW" ] && [ -r "$ROOT/host/LaunchDaemons/smb-guard.plist.in" ]; then
             -e "s|@SLEEPWATCHER_BIN@|$SW|g" \
             "$1" > "$2"
     }
-    render "$ROOT/host/LaunchDaemons/smb-guard.plist.in"    "$STAGE/guard.plist"
-    render "$ROOT/host/LaunchDaemons/sleepwatcher.plist.in" "$STAGE/watch.plist"
-    render "$ROOT/host/newsyslog.d/smb.conf.in"             "$STAGE/newsyslog.conf"
+    render "$REPOD/host/LaunchDaemons/smb-guard.plist.in"    "$STAGE/guard.plist"
+    render "$REPOD/host/LaunchDaemons/sleepwatcher.plist.in" "$STAGE/watch.plist"
+    render "$REPOD/host/newsyslog.d/smb.conf.in"             "$STAGE/newsyslog.conf"
     drift "$GUARD_PLIST" "$STAGE/guard.plist"
     drift "$WATCH_PLIST" "$STAGE/watch.plist"
     drift "$NEWSYSLOG"   "$STAGE/newsyslog.conf"
@@ -436,6 +467,62 @@ elif [ "${mnt#*mounted by $SMBG_OWNER}" != "$mnt" ]; then
     ok "mount HEALTHY (mounted by $SMBG_OWNER)"
 else
     fail "mount FOREIGN — ownership hijacked" "sudo smb-guard --ensure"
+fi
+
+# ── 7. Workspace git filemode — the Layer 8 operating contract ─────────────
+# With the NFS ACE channel disarmed (fruit:nfs_aces = no in [global]), git must
+# ignore modes on the Mac and judge them on the guest. Two state faults break
+# that split, and both are written by routine git use, not by configuration
+# drift — which is why they are swept here (audit only, remedies printed —
+# Principle 21):
+#   - a repo-local core.filemode (clone/init writes one on either side)
+#     poisons the *other* side's mode judgement;
+#   - a Mac-side checkout of an executable file drops its server x bit
+#     (the mode the checkout applies rides the disarmed channel), which the
+#     guest sees as index-vs-worktree mode drift.
+section "workspace git filemode (Layer 8 operating contract)"
+
+if [ -z "$mnt" ] || [ "${mnt#*mounted by $SMBG_OWNER}" = "$mnt" ]; then
+    skip "repo-local core.filemode sweep (mount not healthy)"
+elif ! command -v git >/dev/null 2>&1; then
+    skip "repo-local core.filemode sweep (no git on the host)"
+else
+    n_poison=0
+    while IFS= read -r g; do
+        [ -n "$g" ] || continue
+        d="$(dirname "$g")"
+        if v="$(git -C "$d" config --local core.filemode 2>/dev/null)"; then
+            fail "repo-local core.filemode=$v: $d — poisons the other side's mode judgement" \
+                 "git -C '$d' config --unset core.filemode"
+            n_poison=$((n_poison + 1))
+        fi
+    done <<FILEMODE_SWEEP
+$(find "$SMBG_MP" -maxdepth 4 -name .git 2>/dev/null)
+FILEMODE_SWEEP
+    [ "$n_poison" -eq 0 ] && ok "no repo-local core.filemode in workspace repositories"
+fi
+
+if [ -z "$ssh_ctx" ] || [ -z "$ssh_out" ]; then
+    skip "guest mode-drift sweep (no guest ssh)"
+elif [ -z "$SMBG_GUEST_ROOT" ]; then
+    skip "guest mode-drift sweep (no SMBG_GUEST_ROOT in the configuration)"
+else
+    # `; true` keeps the transport status separate from grep's no-match status.
+    remote='for g in $(find '"$SMBG_GUEST_ROOT"' -maxdepth 4 -name .git 2>/dev/null); do d="${g%/.git}"; git -C "$d" diff --summary 2>/dev/null | grep "^ mode change" | sed "s|^|$d:|"; done; true'
+    if [ "$ssh_ctx" = "root->owner" ]; then
+        md="$(sudo -u "$SMBG_OWNER" -H ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" "$remote")" || md="__SSH_FAILED__"
+    else
+        md="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$SMBG_HOST" "$remote")" || md="__SSH_FAILED__"
+    fi
+    if [ "$md" = "__SSH_FAILED__" ]; then
+        skip "guest mode-drift sweep (guest ssh failed)"
+    elif [ -n "$md" ]; then
+        fail "index-vs-worktree mode drift on the guest — a Mac-side checkout dropped x bits?" \
+             "on the guest: git -C <repo> checkout -- <path>   (per line below)"
+        printf '%s\n' "$md" | sed 's/^/        /'
+    else
+        ok "no index-vs-worktree mode drift in guest repositories"
+    fi
 fi
 
 # ── Verdict ────────────────────────────────────────────────────────────────
