@@ -84,6 +84,28 @@ Reclamation happens on the guest. The temporary directory contains contaminated
 basenames, so **an `rm -rf` from the Mac would catch the cleanup itself in the same
 defect** — a case this tool demonstrated on itself.
 
+## `experiment-layer8-nfs-aces.sh` (pending experiment)
+
+The guest-side switch for the
+[Layer 8](../docs/failure-model.md#layer-8--client-permission-writes-are-applied-verbatim-with-no-server-side-floor)
+blocking experiment (docs/open-questions.md, 'fruit:nfs_aces in [global]').
+`fruit:nfs_aces` is a global-only option and the per-share `no` this repository
+shipped was a silent no-op; this tool arms it where it actually lives.
+
+Run **on the guest, as root** — unlike the probes, it changes the running Samba
+configuration, which is exactly why it exists as a reviewed script rather than ad
+hoc commands. `--apply` backs up `smb.conf`, comments out any per-share line,
+inserts the option into `[global]`, validates with testparm before touching the
+live file, and restarts smbd. `--revert` restores the backup. Both remind you of
+the trap that invalidates the measurement: AAPL capabilities are negotiated once
+per session, so the Mac must unmount everything and reconnect before any
+observation counts.
+
+```bash
+sudo ./experiment-layer8-nfs-aces.sh --apply
+sudo ./experiment-layer8-nfs-aces.sh --revert
+```
+
 ## `probe-layer4b.sh`
 
 A one-off tool for narrowing down the cause of

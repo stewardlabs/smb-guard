@@ -116,3 +116,48 @@ SMB는 핸들 기반이라 모든 조작(모드 변경·rename·삭제 포함)�
 (자동저장 헬퍼)와 644 최종 폴더를 남기고, 상위 디렉토리 모드도 건드릴 수
 있다(측정 중 tas/가 755→700으로 바뀐 것을 확인, 원복함). 재현 후에는 상위
 디렉토리 모드까지 대조하라.
+
+## 소스 판독 — 가드는 있었고, 우리 배치가 무효였다 (2026-08-19)
+
+미결로 남겼던 "`fruit:nfs_aces = no`가 modify 경로를 막지 못한다"의 진상을
+Samba 4.23.6 소스(`source3/modules/vfs_fruit.c`, GitLab `samba-4.23.6` 태그)
+판독으로 규명했다. 게스트 실행 버전은 4.23.6-Ubuntu-4.23.6+dfsg-1ubuntu2.2.
+
+- **가드는 존재한다.** `check_ms_nfs()`는 `config->unix_info_enabled`가 꺼져
+  있으면 조기 반환하고(1300행), 그 경우 `fruit_fset_nt_acl()`의 `do_chmod`가
+  false로 남아 `SMB_VFS_FCHMOD` 자체가 실행되지 않는다.
+- **문제는 옵션 파싱의 스코프다.** `config->unix_info_enabled =
+  lp_parm_bool(-1, "fruit", "nfs_aces", true)` (338행) — snum이 `-1`이라
+  **[global] 섹션만 조회**한다. share 섹션의 `fruit:nfs_aces = no`는 조회
+  대상이 아니고, 기본값 true가 남는다. 같은 `-1` 패턴이 `fruit:aapl`,
+  `fruit:copyfile`에도 쓰이고, `veto_appledouble`·`time machine` 등은
+  `SNUM(handle->conn)`로 per-share 조회다 — 옵션마다 스코프가 갈린다.
+- **매뉴얼도 같은 말을 하고 있었다.** vfs_fruit(8) GLOBAL OPTIONS 절: "The
+  following options must be set in the global smb.conf section and won't take
+  effect when set per share" — `fruit:nfs_aces`가 그 목록에 있다. 층 8 등재
+  당시 옵션 설명("querying and modifying")만 읽고 절 머리의 배치 제약을
+  놓쳤다.
+- **실측 환경 대조:** 게스트 배포본 `/etc/samba/smb.conf` 136행의
+  `fruit:nfs_aces = no`는 `[ws]` 섹션(89행) 안 — 템플릿과 동일한 무효 배치.
+  즉 측정 당시 이 옵션은 사실상 기본값(켜짐)이었다.
+
+판정: 상류 결함이 아니라 **설정 배치 오류**. 리포트할 것 없음. 기각 가설 표의
+"`fruit:nfs_aces = no`가 이 채널을 끈다 — 기각"은 "share 섹션 배치가 무효"로
+정정된다 — 채널을 끄는 능력 자체는 기각된 적이 없다.
+
+부수 확인 — [global] 배치로 껐을 때 같은 플래그에 함께 걸리는 것들:
+
+- AAPL 협상 응답의 `SMB2_CRTCTX_AAPL_SUPPORTS_NFS_ACE` 서버 캐퍼빌리티 광고
+  (884행) — 클라이언트가 채널 미지원을 학습하므로 chmod 요청 자체가 사라질
+  가능성이 높다.
+- readdir 강화 응답의 `unix_mode` (4532행) — 맥의 모드 표시가 합성값이 된다.
+  맥 쪽 git이 실행 비트 차이를 유령 변경으로 볼 수 있는지가 측정 대상.
+- `fruit_fget_nt_acl()`의 가상 NFS ACE 3종(mode/uid/gid, 4589행) — 조회측도
+  함께 꺼진다. 구 주석의 "query side는 유지"도 오류였다 — per-share 배치는
+  양쪽 모두에 무효였다.
+
+차단 실험(옵션을 [global]로 이동 + smbd 재시작, sudo 필요)은
+open-questions.md의 재개 조건으로 넘긴다. 게스트측 스위치는
+`tools/experiment-layer8-nfs-aces.sh`. 주의: AAPL 캐퍼빌리티는 세션당 1회
+협상이므로, 측정 전에 맥의 SMB 세션을 완전히 끊고(전 마운트 해제) 새로
+붙어야 한다.

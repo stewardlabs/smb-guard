@@ -51,6 +51,16 @@
 #      write. Registered as failure-model Layer 8. Nothing functional changes in
 #      this file.
 #
+# One 2026-08-19 correction:
+#
+#   6) fruit:nfs_aces moved out of the share section — source reading (4.23.6)
+#      resolved item 5's mystery: the option is GLOBAL-ONLY (vfs_fruit(8) GLOBAL
+#      OPTIONS: "won't take effect when set per share"; the module reads it with
+#      lp_parm_bool(-1, ...)). The per-share line was a silent no-op — the guard
+#      in check_ms_nfs() exists but never armed. It now sits in [global],
+#      commented out until the collateral experiment in docs/open-questions.md
+#      runs. Nothing functional changes in this file — a no-op line was removed.
+#
 # Operational contract: if cruft becomes a problem again, **fix the cleanup side.**
 #            Restoring veto is a reintroduction of -8062.
 #            Put nothing but the workspace at the share root — any name that
@@ -98,6 +108,18 @@
 
    map to guest = bad user
    usershare allow guests = yes
+
+#--- macOS NFS ACE channel (vfs_fruit GLOBAL option — header item 6) -----------
+# fruit:nfs_aces is global-only: set per share it silently takes no effect
+# (vfs_fruit(8) GLOBAL OPTIONS; lp_parm_bool(-1, ...) consults [global] only).
+# That is why the Layer 8 capture saw client chmods land "with the option set" —
+# earlier revisions carried it inside the share section, a no-op.
+# Off, it disarms the whole NFS ACE channel at AAPL negotiation: the Archive
+# Utility's self-destructive 0644 chmod would be ignored, but every intentional
+# mode operation from the Mac (chmod +x included) dies with it and mode display
+# goes synthetic. That collateral is unmeasured — keep this commented out until
+# the experiment in docs/open-questions.md runs (tools/experiment-layer8-...).
+#  fruit:nfs_aces = no
 
 
 [@SHARE@]
@@ -152,11 +174,9 @@
 # back to yes.
    fruit:veto_appledouble = no
 
-# Intended to stop the Finder's chown/chmod misbehaviour. Measured on 4.23.6: it
-# does NOT gate the modify path — a client mode write (`MS NFS chmod request`)
-# lands verbatim with this set to no (failure-model.md Layer 8, open-questions.md).
-# Kept for the query side and as recorded intent.
-   fruit:nfs_aces = no
+# fruit:nfs_aces does NOT belong here — it is a global-only option and a
+# per-share setting is a silent no-op (header item 6). Its commented-out home is
+# the [global] section above.
 
 #--- No veto (v17) -------------------------------------------------------------
 # Do not put veto files here. With it, every Finder copy fails with -8062.

@@ -7,6 +7,33 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.2.1] — 2026-08-19
+
+### Fixed
+
+- **The Layer 8 record corrected: `fruit:nfs_aces` is a global-only option, and
+  the per-share `no` this repository shipped was a silent no-op** — resolved by
+  reading the 4.23.6 source. `check_ms_nfs()` does guard the modify path, but
+  the module reads the option with `lp_parm_bool(-1, ...)`, which consults the
+  `[global]` section only — exactly as the manual's GLOBAL OPTIONS section says
+  ("won't take effect when set per share"). The measured acceptance of client
+  chmods was the guard never arming, not an upstream defect; nothing to report.
+  The template now carries the option as a commented-out `[global]` entry: off,
+  it disarms the whole NFS ACE channel at AAPL negotiation, taking every
+  intentional Mac-side mode operation and real mode display down with it, so
+  arming it waits for the collateral experiment registered in open-questions.md
+  (failure-model.md Layer 8, decisions.md, smb.conf.in; the measurement ledger
+  gained a source-reading section)
+
+### Added
+
+- `tools/experiment-layer8-nfs-aces.sh`: the guest-side switch for that
+  experiment — comments out any per-share line, inserts `fruit:nfs_aces = no`
+  into `[global]` with a backup and testparm validation before touching the live
+  file, restarts smbd; `--revert` restores. Both directions remind that AAPL
+  capabilities are negotiated once per session, so the Mac must fully disconnect
+  before measuring
+
 ## [1.2.0] — 2026-08-18
 
 ### Added
