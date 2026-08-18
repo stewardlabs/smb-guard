@@ -679,26 +679,46 @@ Everyday traffic is unaffected: files and directories the guest creates with
 POSIX `chmod` and `unlink` need no access bits on the target itself — this trap is
 SMB-specific.
 
-### Remedy: extract with CLI tools, recover with chmod
+### Remedy: disarm the chmod channel server-side (adopted 2026-08-19)
 
-The client cannot be fixed and the server offers no floor, so the remedy is
-operational:
+`fruit:nfs_aces = no` in `[global]` — where the option actually lives; the
+per-share placement earlier revisions shipped was a silent no-op
+(source-verified). Off, the server stops advertising the AAPL
+`SUPPORTS_NFS_ACE` capability at session negotiation and the whole channel goes
+down. Measured on a fresh session after the switch:
 
-- **Do not extract archives with the Archive Utility on the mount.** `ditto -xk
-  <archive>.zip <dest>` and `unzip` both extract correctly (measured) — they create
-  the destination with sane modes before writing into it.
-- A dimmed folder left behind: `chmod u+rwX <folder>` from the Mac, then use or
-  remove it.
-- A mode-0000 object: `chmod -R u+rwX` **on the guest**.
-- Detection sweep for the unrecoverable class: `find <workspace> -perm 0` on the
-  guest.
+- **Every client mode write is silently ignored** — `chmod 000`/`600`/`+x` on a
+  file and the killer `chmod 644` on a directory all return exit 0 on the Mac
+  and change nothing on the server; modes stay what the masks made them.
+- **The Archive Utility extraction that died against its own 0644 simply
+  succeeds end to end** — all files present, final directory 0755, no dimmed
+  folder. (Reproduced with a synthetic archive matching the captured shape —
+  directory entry stored 0644, files 0600 — the original archive no longer
+  exists.)
+- **The unrecoverable mode-0000 class can no longer be created from the
+  client.**
 
-The chmod channel *can* be genuinely disabled — `fruit:nfs_aces = no` placed in
-`[global]`, where the option actually lives (the per-share placement this
-repository shipped was a silent no-op; source-verified 2026-08-19). Whether the
-Archive Utility then survives its own chmod being ignored, and what the
-collateral costs, are the pending experiment (open-questions.md). If it survives,
-this remedy is upgraded from operational avoidance to a server-side fix.
+The collateral, measured and accepted:
+
+- Intentional mode changes from the Mac are silent no-ops too — `chmod +x`
+  included. **Mode changes are made on the guest.** The silence is the ugly
+  part: the client sees success.
+- The Mac's mode display is synthetic (everything `rwx------`). Enforcement
+  stays server-side, so this is cosmetic — but do not read Mac `ls -l` as
+  truth; that rule (guest `stat` is the determination) already stood.
+- git on the Mac would see a phantom `100644 => 100755` on every tracked file
+  (the synthetic mode carries x). The mitigation and its clone-time trap are in
+  operations.md — repo-local `core.filemode` unset plus a Mac machine-local
+  `includeIf` overlay, guest unaffected.
+
+The operational remedy stays documented as the fallback for a configuration
+where the channel is armed again (doctor.sh asserts the invariant; its loss is
+how this layer would silently return):
+
+- Extract with CLI tools: `ditto -xk <archive>.zip <dest>` or `unzip`.
+- A dimmed folder left behind: `chmod u+rwX <folder>` from the Mac.
+- A mode-0000 object: `chmod -R u+rwX` **on the guest**; detection sweep
+  `find <workspace> -perm 0` on the guest.
 
 ---
 
@@ -719,8 +739,8 @@ this remedy is upgraded from operational avoidance to a server-side fix.
 | `ENOENT` only when overwriting an existing file | share root name collision (Layer 6) | check whether that file's basename matches an entry name at the share root. Raise the share root above the workspace |
 | `could not write config file .../.git/config` | as above — the case where `.git/config` is caught | check `.git/config` for damage as well (`fatal: bad config line N`) |
 | `ENOENT: rename '<file>.tmp.NNN' -> '<file>'` | as above — editors and tools using atomic saves | not intermittent but deterministic. Look at the destination basename |
-| Archive Utility "Error 1 - Operation not permitted", a dimmed folder left behind | the utility chmodded its own destination directory to 0644 (Layer 8) | `chmod u+rwX` the folder from the Mac. Extract with `ditto`/`unzip` instead |
-| every operation on one object fails with EACCES, even as its owner | mode 0000 over SMB — every open is denied (Layer 8) | `chmod` on the guest. From the client it is unrecoverable |
+| Archive Utility "Error 1 - Operation not permitted", a dimmed folder left behind | the utility chmodded its own destination directory to 0644 (Layer 8) — **should no longer occur**: the chmod channel is disarmed server-side | its appearance means the `fruit:nfs_aces` invariant was lost — run doctor.sh. Recover with `chmod u+rwX` from the Mac; extract with `ditto`/`unzip` meanwhile |
+| every operation on one object fails with EACCES, even as its owner | mode 0000 over SMB — every open is denied (Layer 8) — **should no longer occur**, as above | `chmod` on the guest (from the client it is unrecoverable), then run doctor.sh — the channel that wrote it is supposed to be disarmed |
 
 **Collecting primary evidence for -8062** — the Finder dialog does not tell you the
 path:

@@ -87,42 +87,6 @@ production mount is stale too, that refutes it.
 
 ## Unconfirmed
 
-### `fruit:nfs_aces` in `[global]` — the collateral of disarming the NFS ACE channel
-
-The predecessor of this item ("`fruit:nfs_aces = no` does not gate the modify
-path") was **resolved 2026-08-19 by reading the 4.23.6 source** — its resume
-condition, executed. `check_ms_nfs()` in `source3/modules/vfs_fruit.c` does guard
-the modify path: with the option off it returns early and no chmod happens. But
-the module reads the option with `lp_parm_bool(-1, ...)`, which consults the
-`[global]` section only, exactly as the manual's GLOBAL OPTIONS section says:
-"must be set in the global smb.conf section and won't take effect when set per
-share". This repository's template carried the option **inside the share
-section**, where it is a silent no-op — the measured acceptance of
-`MS NFS chmod request` was the guard never arming, not a defect. Nothing to
-report upstream. The same flag also drives the query side (`fruit_fget_nt_acl()`,
-the AAPL `SUPPORTS_NFS_ACE` capability advertisement, and the UNIX mode in
-enriched enumeration), so the old comment's "kept for the query side" was wrong
-too — per share, the line did nothing at all.
-
-What remains unmeasured is the switch actually thrown. Off in `[global]`, the
-server stops advertising the capability at AAPL negotiation, and the whole
-channel goes down with it: the Archive Utility's self-destructive 0644 would be
-neutralised, but **every intentional mode operation from the Mac (`chmod +x`
-included) rides the same channel**, and mode display on the client goes
-synthetic — which may make git on the Mac see phantom executable-bit changes.
-
-Resume condition (needs sudo on the guest, and a fresh SMB session from the Mac —
-AAPL capabilities are negotiated once per session):
-1. Move the option to `[global]` and restart smbd —
-   `tools/experiment-layer8-nfs-aces.sh` is the reviewed switch, with `--revert`.
-2. On a probe mount, measure the collateral: `ls -l` mode display, intentional
-   `chmod` (loud failure, silent no-op, or locally faked?), and `git status`
-   against a tree with executable bits.
-3. Re-run the Archive Utility end-to-end: with its chmod ignored, the extraction
-   may simply succeed — which upgrades Layer 8's remedy from operational
-   avoidance to a server-side fix (the template's commented-out `[global]` entry
-   then becomes active).
-
 ### When the Layer 6 fix gets backported
 
 The identity of the defect and the fixing commit are settled (failure-model.md
@@ -186,10 +150,11 @@ If it recurs, determine it with the clock in a healthy state.
   every 15 minutes could become a burden. Excluding build artefacts currently
   removes 97% of the traversal.
 - **Considering `nt acl support = no`** — for cases where POSIX ACLs (`+`)
-  accumulate through SMB. Against Layer 8's client permission writes it is now the
-  **second** candidate: `fruit:nfs_aces = no` in `[global]` cuts the same chmod
-  channel more narrowly (see 'fruit:nfs_aces' under Unconfirmed), while this one
-  takes the whole NT ACL surface down with it.
+  accumulate through SMB. Its Layer 8 role is gone: `fruit:nfs_aces = no` in
+  `[global]` was measured to cut the chmod channel and was adopted as the
+  server-side remedy (failure-model.md Layer 8, 2026-08-19). What keeps this
+  candidate on the list is only the ACL-accumulation case, and it would take the
+  whole NT ACL surface down — do not reach for it without a measured need.
 
 ---
 

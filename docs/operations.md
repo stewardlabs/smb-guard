@@ -108,7 +108,13 @@ present in the source is outside the suppression's remit.
 
 ### Archive extraction failures (Error 1) and permission wreckage
 
-The Archive Utility chmods its own destination directory to 0644 on an SMB volume
+**This class should no longer occur** — the chmod channel it rides is disarmed
+server-side (`fruit:nfs_aces = no` in `[global]`, Layer 8, adopted 2026-08-19).
+If it appears anyway, the invariant was lost: run `tools/doctor.sh` and check
+the guest configuration before anything else.
+
+While the channel is armed (invariant lost, or deliberately reverted): the
+Archive Utility chmods its own destination directory to 0644 on an SMB volume
 and aborts (Layer 8). Do not use it on the mount — `ditto -xk <archive> <dest>`
 and `unzip` extract correctly.
 
@@ -121,6 +127,35 @@ The mode-0000 class (every open denied — Layer 8) is recoverable only on the
 guest: `find <workspace> -perm 0` to detect, `chmod -R u+rwX` to free. The chmod
 channel itself is visible at `log level = 10` in the smbd log as
 `MS NFS chmod request`.
+
+### git on the Mac — filemode
+
+With the NFS ACE channel disarmed, the Mac's smbfs displays a synthetic mode
+(`rwx------`) for everything, and a Mac-side `chmod` is a silent no-op. Two
+operational consequences:
+
+- **Mode changes (`chmod +x` included) are made on the guest.** The Mac's exit 0
+  means nothing landed.
+- **git must ignore modes on the Mac, and only there.** With `core.filemode =
+  true`, every tracked file shows a phantom `100644 => 100755`. The deployed
+  mitigation: each workspace repository's repo-local `core.filemode` is unset
+  (the guest then falls back to the built-in default `true` and keeps judging
+  real ext4 modes), and the Mac's machine-local git configuration carries a
+  workspace-scoped overlay — `[includeIf "gitdir:/opt/stewardlabs/"]` including
+  a snippet with `core.filemode = false`. The repo-local unset matters because
+  a repo-local value overrides every include.
+
+**The clone-time trap — both directions (measured):** `git clone`/`git init`
+writes a repo-local `core.filemode`, and a repo-local value poisons the *other*
+side. A clone made on the Mac writes `false` (git's probe sees the synthetic x
+bit already set on a fresh file and declares modes untrustworthy) — repo-local
+`false` then makes the **guest** ignore real modes in that repository, and new
+scripts get committed as 100644. A clone made on the guest writes `true` (ext4,
+real modes) — repo-local `true` overrides the Mac's include and the phantom
+diffs return there. Either way the fix is the same: **after any clone in the
+workspace, run `git config --unset core.filemode` in the new repository.** Each
+side then falls back to its correct value (guest: built-in `true`; Mac: the
+overlay's `false`).
 
 ### Guest
 

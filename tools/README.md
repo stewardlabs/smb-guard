@@ -84,13 +84,16 @@ Reclamation happens on the guest. The temporary directory contains contaminated
 basenames, so **an `rm -rf` from the Mac would catch the cleanup itself in the same
 defect** — a case this tool demonstrated on itself.
 
-## `experiment-layer8-nfs-aces.sh` (pending experiment)
+## `experiment-layer8-nfs-aces.sh`
 
 The guest-side switch for the
 [Layer 8](../docs/failure-model.md#layer-8--client-permission-writes-are-applied-verbatim-with-no-server-side-floor)
-blocking experiment (docs/open-questions.md, 'fruit:nfs_aces in [global]').
-`fruit:nfs_aces` is a global-only option and the per-share `no` this repository
-shipped was a silent no-op; this tool arms it where it actually lives.
+blocking experiment. `fruit:nfs_aces` is a global-only option and the per-share
+`no` this repository shipped was a silent no-op; this tool arms it where it
+actually lives. **The experiment ran 2026-08-19 and the switch was adopted as
+Layer 8's server-side remedy** — the tool remains the reviewed way to revert
+(`--revert`) or re-arm it, and the template now carries the option in
+`[global]` for fresh deployments.
 
 Run **on the guest, as root** — unlike the probes, it changes the running Samba
 configuration, which is exactly why it exists as a reviewed script rather than ad
