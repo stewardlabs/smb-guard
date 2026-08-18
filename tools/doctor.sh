@@ -412,6 +412,15 @@ else
         else
             ok "store dos attributes not overridden to No"
         fi
+        # Scoped to [global] on purpose: fruit:nfs_aces is a global-only option
+        # and a per-share line is a silent no-op (Layer 8). A whole-output grep
+        # would false-pass exactly the misplacement that hid Layer 8.
+        if printf '%s\n' "$TP" | awk '/^\[/ { ing = ($0 == "[global]") } ing && /^[[:space:]]*fruit:nfs_aces = no$/ { found = 1 } END { exit !found }'; then
+            ok "fruit:nfs_aces = no (in [global])"
+        else
+            fail "'fruit:nfs_aces = no' missing from [global] — the client chmod channel is armed and Layer 8 permission wreckage returns (Archive Utility kills its target, mode-0000 unrecoverables)" \
+                 "sudo tools/experiment-layer8-nfs-aces.sh --apply on the guest, or merge guest/samba/smb.conf.in"
+        fi
     fi
 fi
 

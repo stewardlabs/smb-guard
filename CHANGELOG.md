@@ -7,6 +7,36 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.3.0] — 2026-08-19
+
+### Changed
+
+- **Layer 8's remedy promoted from operational avoidance to a server-side fix:
+  `fruit:nfs_aces = no` is now armed in `[global]` in the template** — the
+  blocking experiment ran on a fresh session and the channel is genuinely cut:
+  every client mode write is silently ignored (guest modes stay mask-pure, the
+  unrecoverable mode-0000 class cannot be created from the client any more) and
+  the Archive Utility extraction that used to die against its own 0644 chmod
+  simply succeeds end to end. The measured collateral, accepted: intentional
+  Mac-side chmod is a silent no-op (mode changes are made on the guest), the
+  Mac's mode display is synthetic, and git on the Mac needs the filemode
+  mitigation now documented in operations.md — repo-local `core.filemode` unset
+  plus a Mac machine-local workspace-scoped `includeIf` overlay, with the
+  measured both-direction clone trap (a Mac clone writes repo-local `false` and
+  kills guest mode fidelity; a guest clone writes `true` and revives the Mac's
+  phantom diffs; either way, unset after cloning)
+  (failure-model.md Layer 8, operations.md, smb.conf.in, open-questions.md —
+  the Unconfirmed item is resolved and removed; the measurement ledger gained
+  the experiment section)
+
+### Added
+
+- `tools/doctor.sh`: **`fruit:nfs_aces = no` invariant, scoped to `[global]`**
+  in the guest samba invariants section — a whole-output grep would false-pass
+  a per-share line, which is exactly the misplacement that hid Layer 8; losing
+  this invariant is how the Archive Utility wreckage and the mode-0000 class
+  would silently return
+
 ## [1.2.1] — 2026-08-19
 
 ### Fixed

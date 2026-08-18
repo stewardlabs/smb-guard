@@ -61,6 +61,16 @@
 #      commented out until the collateral experiment in docs/open-questions.md
 #      runs. Nothing functional changes in this file — a no-op line was removed.
 #
+# One 2026-08-19 adoption (same day, after the experiment):
+#
+#   7) fruit:nfs_aces = no armed in [global] — the blocking experiment ran and
+#      the Archive Utility extraction that used to die against its own 0644
+#      chmod simply succeeds with the channel disarmed. Layer 8's remedy is
+#      promoted from operational avoidance to this server-side fix. The
+#      measured collateral (client chmod becomes a silent no-op, synthetic mode
+#      display, git filemode mitigation on the Mac) is recorded in
+#      failure-model.md Layer 8 and docs/operations.md.
+#
 # Operational contract: if cruft becomes a problem again, **fix the cleanup side.**
 #            Restoring veto is a reintroduction of -8062.
 #            Put nothing but the workspace at the share root — any name that
@@ -109,17 +119,22 @@
    map to guest = bad user
    usershare allow guests = yes
 
-#--- macOS NFS ACE channel (vfs_fruit GLOBAL option — header item 6) -----------
+#--- macOS NFS ACE channel (vfs_fruit GLOBAL option — header items 6/7) --------
 # fruit:nfs_aces is global-only: set per share it silently takes no effect
 # (vfs_fruit(8) GLOBAL OPTIONS; lp_parm_bool(-1, ...) consults [global] only).
 # That is why the Layer 8 capture saw client chmods land "with the option set" —
 # earlier revisions carried it inside the share section, a no-op.
-# Off, it disarms the whole NFS ACE channel at AAPL negotiation: the Archive
-# Utility's self-destructive 0644 chmod would be ignored, but every intentional
-# mode operation from the Mac (chmod +x included) dies with it and mode display
-# goes synthetic. That collateral is unmeasured — keep this commented out until
-# the experiment in docs/open-questions.md runs (tools/experiment-layer8-...).
-#  fruit:nfs_aces = no
+# Off, it disarms the whole NFS ACE channel at AAPL negotiation. Measured
+# (2026-08-19, fresh session): every client mode write is silently ignored, the
+# Archive Utility extraction that died against its own 0644 chmod simply
+# succeeds, and the unrecoverable mode-0000 class cannot be created from the
+# client any more — this line IS Layer 8's remedy (failure-model.md).
+# The accepted collateral: intentional chmod from the Mac is a silent no-op too
+# (mode changes are made on the guest), the Mac's mode display is synthetic,
+# and git on the Mac needs the filemode mitigation (docs/operations.md).
+# doctor.sh asserts this line in [global] — a per-share copy would false-pass a
+# whole-output grep, which is exactly the misplacement that hid Layer 8.
+   fruit:nfs_aces = no
 
 
 [@SHARE@]
@@ -143,7 +158,9 @@
    directory mask = 0755
 
 # The masks act at creation only. Nothing here floors a mode the client sets
-# afterwards — a client chmod lands verbatim (failure-model.md Layer 8).
+# afterwards — but the channel a client chmod rides is disarmed globally
+# (fruit:nfs_aces = no in [global], failure-model.md Layer 8), so in practice
+# these masks are the modes.
 
 # When no, DOS attributes get mapped onto the execute bit and pollute it.
    store dos attributes = yes
