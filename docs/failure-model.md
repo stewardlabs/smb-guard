@@ -705,7 +705,14 @@ The collateral, measured and accepted:
   part: the client sees success.
 - The Mac's mode display is synthetic (everything `rwx------`). Enforcement
   stays server-side, so this is cosmetic — but do not read Mac `ls -l` as
-  truth; that rule (guest `stat` is the determination) already stood.
+  truth; that rule (guest `stat` is the determination) already stood. Execution
+  is *not* display: it follows the server's real x bit (measured — a server-644
+  file shows `rwx------` yet refuses to run).
+- Any Mac-side rewrite of an executable file (a checkout, a pull, an editor
+  save) leaves it 644 on the server — the mode it would apply rides the same
+  disarmed channel. Recovery is a guest-side `git checkout -- <path>` (or
+  `chmod +x` when the content change is wanted); the sweep lives in
+  smb-guard-doctor (operations.md 'git on the Mac — filemode').
 - git on the Mac would see a phantom `100644 => 100755` on every tracked file
   (the synthetic mode carries x). The mitigation and its clone-time trap are in
   operations.md — repo-local `core.filemode` unset plus a Mac machine-local

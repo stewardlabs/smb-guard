@@ -128,6 +128,7 @@ ones are silently ignored.
 | `smb-guard.conf` | `/usr/local/etc/smb-guard.conf` | `root:wheel 644` | the scripts fail at startup |
 | `host/lib/common.sh` | `/usr/local/lib/smb-guard/common.sh` | `root:wheel 644` (**no exec bit**) | — |
 | `host/sbin/*` | `/usr/local/sbin/` | `root:wheel 755` | group/other writable is a privilege escalation vulnerability |
+| `tools/doctor.sh` | `/usr/local/sbin/smb-guard-doctor` | `root:wheel 755` | without it, a dead mount takes its own diagnostic tool down with it |
 | `host/LaunchDaemons/smb-guard.plist.in` | `/Library/LaunchDaemons/<prefix>.smb-guard.plist` | `root:wheel 644` | **launchd refuses to load it** |
 | `host/LaunchDaemons/sleepwatcher.plist.in` | `/Library/LaunchDaemons/<prefix>.sleepwatcher.plist` | `root:wheel 644` | same |
 | `host/newsyslog.d/smb.conf.in` | `/etc/newsyslog.d/<prefix>.smb.conf` | `root:wheel 644` | **silently ignored — the log grows without bound** |
@@ -177,6 +178,7 @@ below (0, 1 and part of 3), and **right after a macOS major upgrade you run this
 first.**
 
 ```bash
+sudo smb-guard-doctor           # deployed copy — use this when the mount itself is in question
 sudo ./tools/doctor.sh          # 0 healthy / 1 faults / 2 verdict incomplete (root-only items skipped)
 ```
 

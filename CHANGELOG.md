@@ -7,6 +7,36 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.4.0] — 2026-08-19
+
+### Added
+
+- **The doctor is now deployed: `tools/doctor.sh` -> `/usr/local/sbin/smb-guard-doctor`
+  (host/install.sh, root:wheel 755)** — the mount's own doctor must not live
+  only on the mount it diagnoses (a dead mount used to take its diagnostic tool
+  down with it), and a script executed off the mount is exposed to the Layer 8
+  x-bit loss, which happened to doctor.sh itself (the first Mac-side pull after
+  the 1.3.0 adoption left it non-executable; recovered with a guest-side
+  checkout). The deployed copy finds the repo through the new optional
+  `SMBG_REPO` configuration key for its drift comparisons — with the repo
+  unreachable those comparisons skip rather than fail, and the doctor checks
+  its own deployed copy for drift like every other deployed file
+- `tools/doctor.sh`: **Layer 8 operating-contract sweeps** — repo-local
+  `core.filemode` in any workspace repository (every clone/init writes one, and
+  it poisons the other side's mode judgement), and index-vs-worktree mode drift
+  on the guest (the trace of a Mac-side checkout dropping x bits). Audit only,
+  remedies printed (Principle 21)
+
+### Changed
+
+- operations.md 'git on the Mac — filemode' extended with the measured
+  execution semantics: execution follows the server's real x bit while the
+  synthetic display lies in both directions; a Mac-side checkout/pull that
+  rewrites an executable file drops its server x bit (guest-side
+  `git checkout -- <path>` recovers); after a guest-side `chmod +x` the Mac's
+  attribute cache can keep refusing execution until the directory is touched.
+  failure-model.md Layer 8 carries the same collateral in its remedy section
+
 ## [1.3.0] — 2026-08-19
 
 ### Changed

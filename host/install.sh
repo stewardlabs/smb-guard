@@ -137,6 +137,8 @@ cat <<PLAN
                  -> /usr/local/lib/smb-guard/common.sh          (root:wheel 644, no exec bit)
   executables    host/sbin/{smb-guard,smb-guard-sleep,smb-guard-wakeup,smbfix}
                  -> /usr/local/sbin/                            (root:wheel 755)
+  doctor         tools/doctor.sh
+                 -> /usr/local/sbin/smb-guard-doctor            (root:wheel 755)
   LaunchDaemon
                  -> $GUARD_PLIST   (root:wheel 644)
                  -> $WATCH_PLIST   (root:wheel 644)
@@ -198,6 +200,11 @@ for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix; do
     install -o root -g wheel -m 755 "$HERE/sbin/$f" "/usr/local/sbin/$f"
     echo "   /usr/local/sbin/$f"
 done
+# The doctor deploys under the family-prefixed name (never a generic name in
+# sbin). A deployed copy exists so that the mount's own doctor does not live on
+# the mount it diagnoses.
+install -o root -g wheel -m 755 "$HERE/../tools/doctor.sh" /usr/local/sbin/smb-guard-doctor
+echo "   /usr/local/sbin/smb-guard-doctor (from tools/doctor.sh)"
 
 echo "== 6. plists =="
 install -o root -g wheel -m 644 "$STAGE/guard.plist" "$GUARD_PLIST"
@@ -210,7 +217,8 @@ install -o root -g wheel -m 644 "$STAGE/newsyslog.conf" "$NEWSYSLOG"
 
 echo "== 8. syntax check =="
 for f in /usr/local/sbin/smb-guard /usr/local/sbin/smb-guard-sleep \
-         /usr/local/sbin/smb-guard-wakeup /usr/local/sbin/smbfix; do
+         /usr/local/sbin/smb-guard-wakeup /usr/local/sbin/smbfix \
+         /usr/local/sbin/smb-guard-doctor; do
     bash -n "$f" && echo "   $f OK"
 done
 

@@ -97,6 +97,14 @@ SMBG_GUEST_ROOT="/srv/workspace"
 # Optional — leave alone if the defaults are enough
 #===============================================================================
 
+# Repo checkout path (optional). The deployed doctor
+# (/usr/local/sbin/smb-guard-doctor) uses it to find the repo for its drift
+# comparisons when it is not being run from the repo itself. The repo normally
+# lives inside the workspace mount, so when the mount is down those comparisons
+# are skipped — by design: the doctor's core checks must not depend on the very
+# thing it diagnoses, which is also why the doctor is deployed to APFS at all.
+#SMBG_REPO="/opt/workspace/config/smb-guard"
+
 # launchd Label prefix. The plist filenames and the Labels are both generated from
 # this value. Using an organisation's reverse-DNS name is conventional.
 #SMBG_LABEL_PREFIX="io.stewardlabs"
