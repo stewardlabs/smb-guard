@@ -7,6 +7,17 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.4.2] — 2026-08-19
+
+### Fixed
+
+- operations.md 'git on the Mac — filemode': the prescription for **authoring a
+  new executable from the Mac** was missing — a Mac-side `git add` records
+  100644 whatever the intent, so `git update-index --chmod=+x <file>` before
+  committing (measured), or author the file and its mode on the guest. The fact
+  had been measured with the adoption but only appeared in the clone-trap
+  context
+
 ## [1.4.1] — 2026-08-19
 
 ### Fixed
