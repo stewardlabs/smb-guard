@@ -270,16 +270,29 @@ server-side candidate for flooring such a write was measured out: the masks act 
 creation only, the force parameters do not reach the security-descriptor path
 (confirmed on a fresh session), the `security mask` family no longer exists
 (removed in 4.11), and `fruit:nfs_aces = no` — whose comment in this repository's
-own template promised exactly this protection — does not gate the modify path.
+own template promised exactly this protection — did not gate the modify path as
+deployed.
+
+**Corrected 2026-08-19 (source reading, 4.23.6):** the last clause had the wrong
+cause. The guard exists — `check_ms_nfs()` skips the chmod when the option is
+off — but `fruit:nfs_aces` is a global-only option (manual, GLOBAL OPTIONS;
+`lp_parm_bool(-1, ...)` in the module), and this repository set it **per share**,
+where it silently takes no effect. Not an upstream defect, a placement error.
+The channel therefore *can* be cut server-side, more narrowly than
+`nt acl support = no` would; whether to do so waits on the collateral experiment
+in open-questions.md — every intentional mode change from the Mac rides the same
+channel. Until that experiment runs, the operational remedy below stands
+unchanged.
 
 The remedy adopted is operational: archives are extracted with CLI tools
 (`ditto`/`unzip`), recovery is a documented `chmod` (client-side while any owner
 bit remains, guest-side for the 0000 class), and doctor.sh asserts the guest Samba
 invariants so a drifted configuration cannot silently reopen the settled layers.
-`nt acl support = no` — the one candidate that would cut the channel itself — was
-deliberately not adopted: it would also take down every intentional mode change
-from the Mac (`chmod +x` included), and that collateral has not been measured. It
-stays in open-questions.md with its resume condition.
+`nt acl support = no` — before the correction above, the one candidate that would
+cut the channel itself — was deliberately not adopted: it would also take down
+every intentional mode change from the Mac (`chmod +x` included), and that
+collateral has not been measured. It stays in open-questions.md, now as the
+second candidate behind a `[global]` `fruit:nfs_aces = no`.
 
 ---
 

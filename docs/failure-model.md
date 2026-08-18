@@ -620,8 +620,8 @@ lease clients**:
 ## Layer 8 — Client permission writes are applied verbatim, with no server-side floor
 
 **A mode the client asks for is exactly what the server applies — the masks, the
-force parameters and `fruit:nfs_aces = no` all stand aside — and a macOS client
-does ask for destructive ones.** The headline case: the Archive Utility kills its
+force parameters and a per-share `fruit:nfs_aces = no` all stand aside — and a
+macOS client does ask for destructive ones.** The headline case: the Archive Utility kills its
 own extraction target and aborts with "Error 1 - Operation not permitted", leaving
 a dimmed, unusable folder.
 
@@ -654,10 +654,14 @@ directory over the mount fails with `Permission denied`.
 | `create mask` / `directory mask` | not applied — the masks act at creation, this mode arrives afterwards |
 | `force create mode` / `force directory mode` | not applied — confirmed after a reload **and on a fresh session** |
 | the `security mask` family | removed in Samba 4.11 — `Unknown parameter` in 4.23 |
-| `fruit:nfs_aces = no` | **does not gate the modify path** — the log shows `MS NFS chmod request` accepted and applied with the option set (see open-questions.md) |
+| `fruit:nfs_aces = no` **set in the share section** | **a silent no-op** — the option is global-only. vfs_fruit(8) GLOBAL OPTIONS: "must be set in the global smb.conf section and won't take effect when set per share"; the module reads it with `lp_parm_bool(-1, ...)`, which consults `[global]` only (source-verified, 4.23.6). The measured acceptance of `MS NFS chmod request` was the guard never arming, not a missing guard — `check_ms_nfs()` does gate the modify path when the option is off in `[global]` |
 
-There is no server-side floor for a client mode write in current Samba. The chmod
+No mask or force parameter floors a client mode write in current Samba. The chmod
 channel macOS uses (mode bits carried in the security descriptor) lands verbatim.
+The one switch that does reach this path is `fruit:nfs_aces = no` in `[global]` —
+it disarms the whole NFS ACE channel at AAPL negotiation time, taking every
+intentional Mac-side mode operation and real mode display down with it. That
+collateral is unmeasured; the experiment is registered in open-questions.md.
 
 ### The recoverable and the unrecoverable
 
@@ -689,9 +693,12 @@ operational:
 - Detection sweep for the unrecoverable class: `find <workspace> -perm 0` on the
   guest.
 
-Whether the chmod channel can be genuinely disabled — and whether the Archive
-Utility would then survive its own chmod being ignored — is an open question
-(open-questions.md).
+The chmod channel *can* be genuinely disabled — `fruit:nfs_aces = no` placed in
+`[global]`, where the option actually lives (the per-share placement this
+repository shipped was a silent no-op; source-verified 2026-08-19). Whether the
+Archive Utility then survives its own chmod being ignored, and what the
+collateral costs, are the pending experiment (open-questions.md). If it survives,
+this remedy is upgraded from operational avoidance to a server-side fix.
 
 ---
 
