@@ -7,6 +7,21 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.4.1] — 2026-08-19
+
+### Fixed
+
+- **decisions.md caught up with the adoption**: the entry "Remedy client
+  permission writes operationally, not in the Samba configuration" still
+  presented the operational remedy as current — its title now reads "remedied
+  operationally, then superseded by a server-side fix" and a dated superseding
+  paragraph records the 1.3.0 adoption, the demotion of the operational
+  procedures to a fallback, and `nt acl support = no` narrowing to the
+  ACL-accumulation case
+- README and operations.md now name `smb-guard-doctor` (the deployed copy) as
+  the primary invocation, with the in-place `./tools/doctor.sh` noted as the
+  same tool run from the repo
+
 ## [1.4.0] — 2026-08-19
 
 ### Added

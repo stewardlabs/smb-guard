@@ -37,8 +37,12 @@ An SMB mount is not simply either "broken" or "attached". In between there are
 - **The Archive Utility kills its own extraction target** — on an SMB volume it
   chmods the destination directory it has just created to 0644 (no execute bit)
   and then cannot move the extracted files into it: "Error 1 - Operation not
-  permitted", and a dead dimmed folder is left behind. No Samba parameter floors
-  a client mode write. Extract with `ditto`/`unzip` instead; recover with
+  permitted", and a dead dimmed folder is left behind. No mask or force
+  parameter floors a client mode write; the fix carried by this repo's Samba
+  template — and asserted by the doctor — is disarming the chmod channel itself
+  (`fruit:nfs_aces = no` in `[global]`, a global-only option that silently does
+  nothing per share), after which the extraction simply succeeds. While the
+  channel is armed, extract with `ditto`/`unzip` and recover with
   `chmod u+rwX`.
 
 All of them are the kind you cannot see without reading the logs. For the causal
@@ -113,7 +117,8 @@ upgrade can revert the autofs configuration or reset Background Items approval,
 producing a state where the files are intact but the jobs are dead.
 
 ```bash
-sudo ./tools/doctor.sh
+sudo smb-guard-doctor       # deployed copy — works even with the mount down
+sudo ./tools/doctor.sh      # the same tool, run in place from the repo
 ```
 
 You can place everything by hand instead of using the install script —
