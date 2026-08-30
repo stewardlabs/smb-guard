@@ -65,6 +65,7 @@ fi
 : "${SMBG_SHARE_SUBPATH:=}"
 : "${SMBG_LABEL_PREFIX:=io.stewardlabs}"
 : "${SMBG_LOGDIR:=/var/log/smb}"
+: "${SMBG_SELFCHECK_INTERVAL:=86400}"
 
 # For the deployment plan output only. Runtime assembly is done by lib/common.sh —
 # to avoid two definitions, this only displays it, and the scripts use common.sh's
@@ -76,8 +77,10 @@ id -u "$SMBG_OWNER" >/dev/null 2>&1 || {
 
 GUARD_LABEL="$SMBG_LABEL_PREFIX.smb-guard"
 WATCH_LABEL="$SMBG_LABEL_PREFIX.sleepwatcher"
+SELF_LABEL="$SMBG_LABEL_PREFIX.selfcheck"
 GUARD_PLIST="/Library/LaunchDaemons/$GUARD_LABEL.plist"
 WATCH_PLIST="/Library/LaunchDaemons/$WATCH_LABEL.plist"
+SELF_PLIST="/Library/LaunchDaemons/$SELF_LABEL.plist"
 NEWSYSLOG="/etc/newsyslog.d/$SMBG_LABEL_PREFIX.smb.conf"
 
 # ── sleepwatcher binary discovery ──────────────────────────────────────────
@@ -101,7 +104,7 @@ fi
 # Fill the templates' @PLACEHOLDER@ with configuration values. A '|' in a value
 # would collide with the sed delimiter, so it is rejected up front — it is not a
 # character that belongs in a path or a label.
-case "$SMBG_LABEL_PREFIX$SMBG_LOGDIR$SW" in
+case "$SMBG_LABEL_PREFIX$SMBG_LOGDIR$SW$SMBG_SELFCHECK_INTERVAL" in
     *"|"*) echo "configuration values may not contain the '|' character" >&2; exit 78 ;;
 esac
 
@@ -113,11 +116,13 @@ render() {   # render <template> <output path>
     sed -e "s|@LABEL_PREFIX@|$SMBG_LABEL_PREFIX|g" \
         -e "s|@LOGDIR@|$SMBG_LOGDIR|g" \
         -e "s|@SLEEPWATCHER_BIN@|$SW|g" \
+        -e "s|@SELFCHECK_INTERVAL@|$SMBG_SELFCHECK_INTERVAL|g" \
         "$1" > "$2"
 }
 
 render "$HERE/LaunchDaemons/smb-guard.plist.in"    "$STAGE/guard.plist"
 render "$HERE/LaunchDaemons/sleepwatcher.plist.in" "$STAGE/watch.plist"
+render "$HERE/LaunchDaemons/selfcheck.plist.in"    "$STAGE/selfcheck.plist"
 render "$HERE/newsyslog.d/smb.conf.in"             "$STAGE/newsyslog.conf"
 
 # An unsubstituted placeholder left in the rendered output would be deployed as-is
@@ -135,13 +140,14 @@ cat <<PLAN
                  -> $DEST_CONF                                 (root:wheel 644)
   library        host/lib/common.sh
                  -> /usr/local/lib/smb-guard/common.sh          (root:wheel 644, no exec bit)
-  executables    host/sbin/{smb-guard,smb-guard-sleep,smb-guard-wakeup,smbfix}
+  executables    host/sbin/{smb-guard,smb-guard-sleep,smb-guard-wakeup,smbfix,smb-guard-selfcheck}
                  -> /usr/local/sbin/                            (root:wheel 755)
   doctor         tools/doctor.sh
                  -> /usr/local/sbin/smb-guard-doctor            (root:wheel 755)
   LaunchDaemon
                  -> $GUARD_PLIST   (root:wheel 644)
                  -> $WATCH_PLIST   (root:wheel 644)
+                 -> $SELF_PLIST   (root:wheel 644, every ${SMBG_SELFCHECK_INTERVAL}s)
   log rotation   -> $NEWSYSLOG   (root:wheel 644)
   log directory  $SMBG_LOGDIR                                   (root:wheel 755)
 
@@ -170,6 +176,7 @@ echo
 echo "== 1. stop existing jobs =="
 launchctl bootout "system/$WATCH_LABEL" 2>/dev/null || true
 launchctl bootout "system/$GUARD_LABEL" 2>/dev/null || true
+launchctl bootout "system/$SELF_LABEL"  2>/dev/null || true
 # A leftover user-domain agent created by brew makes the hooks fire twice.
 OWNER_UID="$(id -u "$SMBG_OWNER")"
 launchctl bootout "gui/$OWNER_UID/homebrew.mxcl.sleepwatcher" 2>/dev/null || true
@@ -196,7 +203,7 @@ echo "== 4. library (no exec bit — source only) =="
 install -o root -g wheel -m 644 "$HERE/lib/common.sh" /usr/local/lib/smb-guard/common.sh
 
 echo "== 5. executables =="
-for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix; do
+for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix smb-guard-selfcheck; do
     install -o root -g wheel -m 755 "$HERE/sbin/$f" "/usr/local/sbin/$f"
     echo "   /usr/local/sbin/$f"
 done
@@ -207,10 +214,12 @@ install -o root -g wheel -m 755 "$HERE/../tools/doctor.sh" /usr/local/sbin/smb-g
 echo "   /usr/local/sbin/smb-guard-doctor (from tools/doctor.sh)"
 
 echo "== 6. plists =="
-install -o root -g wheel -m 644 "$STAGE/guard.plist" "$GUARD_PLIST"
-install -o root -g wheel -m 644 "$STAGE/watch.plist" "$WATCH_PLIST"
+install -o root -g wheel -m 644 "$STAGE/guard.plist"     "$GUARD_PLIST"
+install -o root -g wheel -m 644 "$STAGE/watch.plist"     "$WATCH_PLIST"
+install -o root -g wheel -m 644 "$STAGE/selfcheck.plist" "$SELF_PLIST"
 plutil -lint "$GUARD_PLIST"
 plutil -lint "$WATCH_PLIST"
+plutil -lint "$SELF_PLIST"
 
 echo "== 7. log rotation =="
 install -o root -g wheel -m 644 "$STAGE/newsyslog.conf" "$NEWSYSLOG"
@@ -218,13 +227,14 @@ install -o root -g wheel -m 644 "$STAGE/newsyslog.conf" "$NEWSYSLOG"
 echo "== 8. syntax check =="
 for f in /usr/local/sbin/smb-guard /usr/local/sbin/smb-guard-sleep \
          /usr/local/sbin/smb-guard-wakeup /usr/local/sbin/smbfix \
-         /usr/local/sbin/smb-guard-doctor; do
+         /usr/local/sbin/smb-guard-selfcheck /usr/local/sbin/smb-guard-doctor; do
     bash -n "$f" && echo "   $f OK"
 done
 
 echo "== 9. registration =="
 launchctl bootstrap system "$GUARD_PLIST"
 launchctl bootstrap system "$WATCH_PLIST"
+launchctl bootstrap system "$SELF_PLIST"
 
 cat <<DONE
 

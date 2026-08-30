@@ -14,9 +14,10 @@ evidence, and deleting them would cut that evidence off.
 
 ## `doctor.sh` (active — deployed as `smb-guard-doctor`)
 
-Survival check of the host (macOS) configuration. **Read-only** — it fixes nothing
-and only prints the remedy command for each item (Principle 21 — audit, but never
-remediate automatically).
+Survival check of the host (macOS) configuration. **Read-only by default** — it
+prints the remedy command for each item and fixes nothing (Principle 21 — audit,
+but never remediate automatically). `--restore` is the single exception, with a
+scope narrow enough to state in one table (below).
 
 Its main use is **detecting reversion right after a macOS major upgrade**. An
 upgrade can undermine this system's premises from two directions:
@@ -38,7 +39,44 @@ state.
 sudo smb-guard-doctor             # deployed copy — works with the mount down
 sudo ./doctor.sh                  # in place from the repo — complete verdict (root)
 ./doctor.sh                       # root-only items are marked as skipped
+
+sudo smb-guard-doctor --restore             # put the autofs files back, then apply
+sudo smb-guard-doctor --restore --dry-run   # show what would change, write nothing
 ```
+
+### `--restore`
+
+The upgrade reversion above is mechanical to repair and its desired state already
+lives in this tool, so the repair lives here too rather than in a second tool that
+would hold a second copy of that state and drift from it (Principle 5).
+
+| Restores | Never touches |
+|---|---|
+| the `/-` direct map line in `/etc/auto_master` | any file's owner or mode — Principle 21's own remit |
+| `AUTOMOUNT_TIMEOUT`, `AUTOMOUNTD_MNTOPTS`, `AUTOMOUNTD_NOSUID` in `/etc/autofs.conf` | `/etc/auto_smb` — it holds credentials, a human writes it |
+| applies them with `automount -vc` | `/usr/local/*` and the plists — the installer's remit |
+| | the mount — `smb-guard --ensure` is advised, not run |
+
+Restoring file *content* grants no privilege that was not granted before, which is
+what separates it from the permission fixes Principle 21 forbids; the reasoning is
+in [decisions.md](../docs/decisions.md). It writes through a staged file and
+`install(1)` (never in place), keeps a `.bak.<epoch>` of what it replaced, and
+applies with `automount -vc` because an edit that was never applied is a success the
+runtime does not share (Principle 9).
+
+`--restore` does not run the inspection — the intended sequence is inspect, restore,
+inspect again. Its own exit codes: 0 restored or nothing to restore, 1 a step
+failed, 2 not root.
+
+### Running on its own
+
+`host/sbin/smb-guard-selfcheck`, driven by the `selfcheck` LaunchDaemon
+(`RunAtLoad` + `SMBG_SELFCHECK_INTERVAL`), runs this tool so that discovery does not
+depend on someone remembering to. It reports only: the full output goes to
+`smb-guard.log`, and a notification is raised in the owner's GUI session when the
+**autofs or launchd** sections carry a FAIL. That filter is deliberate — the guest
+checks would fail whenever the guest is simply switched off, and an alarm that
+cries wolf is ignored when it matters (Principle 23).
 
 The deployed copy finds the repo through `SMBG_REPO` in the configuration; with
 the repo unreachable (mount down) the drift comparisons skip rather than fail.

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- /Library/LaunchDaemons/@LABEL_PREFIX@.selfcheck.plist (root:wheel 644)
+
+	     This file is a template. install.sh substitutes the configuration values
+	     and deploys it — never copy a file that still has placeholders in it.
+
+	     It runs smb-guard-selfcheck, which runs the doctor and reports faults.
+	     It never remediates.
+
+	     RunAtLoad: catches a reversion at the first boot after a macOS upgrade —
+	     the moment the reverted files start being the ones in effect. At that
+	     point there is usually no GUI session yet, so the run logs but cannot
+	     notify; StartInterval is what carries the notification to the owner once
+	     they have logged in.
+
+	     StartInterval rather than StartCalendarInterval: a calendar entry that
+	     falls while the machine is asleep is skipped outright, whereas an
+	     interval fires shortly after wake. This is a desktop that sleeps, so a
+	     fixed time of day would be the less reliable of the two.
+
+	     ProcessType Background: it is a periodic inspection with no deadline, and
+	     the doctor talks to the guest over ssh. Being throttled behind
+	     interactive work is the correct behaviour (Principle 12 — observation
+	     does not belong on the critical path). -->
+	<key>Label</key>
+	<string>@LABEL_PREFIX@.selfcheck</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/smb-guard-selfcheck</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>@SELFCHECK_INTERVAL@</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<!-- Collect stdout and stderr into the same file. The script writes its own
+	     findings through common.sh's log(), so what lands here is what failed
+	     before that point — a bad shebang, a missing common.sh — which is
+	     precisely the case where the script cannot report on itself. -->
+	<key>StandardOutPath</key>
+	<string>@LOGDIR@/selfcheck.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>@LOGDIR@/selfcheck.launchd.log</string>
+</dict>
+</plist>

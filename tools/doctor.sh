@@ -1,6 +1,7 @@
 #!/bin/bash
-# doctor.sh — survival check of the host (macOS) configuration. Read-only: it
-# fixes nothing.
+# doctor.sh — survival check of the host (macOS) configuration. Read-only by
+# default; `--restore` is the single exception and its scope is deliberately
+# narrow (see 'What --restore may touch' below).
 #
 # Why a separate tool: a macOS major upgrade can undermine this system's premises
 # from two directions, and neither is decidable from "does the file exist".
@@ -20,6 +21,28 @@
 # whether to run it. The blanket remedy for anything in the install-managed area
 # is to re-run install.sh.
 #
+# What --restore may touch, and why that does not contradict the above:
+# Principle 21 is about **permissions** — owner and mode. Restoring the *content*
+# of an Apple-distributed file opens no privilege that was not granted before; it
+# puts back a line a human approved once and an upgrade reverted. Applying
+# Principle 19 (distinguish a decision grounded in an observed fact from one
+# grounded in an explanation of that fact), the read-only rule for this tool rests
+# on the permission argument, and that argument does not reach file content. So
+# the boundary is drawn explicitly rather than by extending Principle 21:
+#
+#   restores  /etc/auto_master   the direct map line
+#             /etc/autofs.conf   AUTOMOUNT_TIMEOUT, AUTOMOUNTD_MNTOPTS,
+#                                AUTOMOUNTD_NOSUID
+#             then applies them with automount -vc
+#
+#   never     any file's owner or mode           (Principle 21's own remit)
+#             /etc/auto_smb                      (holds credentials — a human writes it)
+#             /usr/local/*, the plists           (install.sh's remit)
+#             the mount itself                   (smb-guard --ensure — only advised)
+#
+# --restore does not run the inspection: it is a separate mode over the autofs
+# files alone. The intended sequence is inspect -> restore -> inspect again.
+#
 # Limits — what this tool cannot determine:
 #   - For autofs it only reads file contents. Even with correct files, the runtime
 #     still holds the old values until they are applied (sudo automount -vc) —
@@ -37,16 +60,43 @@
 #       (distinguished from 0 so that the "silence" of skipped items is not read
 #       as healthy — Principle 25)
 #
-# usage: sudo smb-guard-doctor [--config <path>]     # deployed copy (host/install.sh)
-#        sudo ./doctor.sh      [--config <path>]     # in place, from the repo
+# usage: sudo smb-guard-doctor [--config <path>]              # deployed copy (host/install.sh)
+#        sudo ./doctor.sh      [--config <path>]              # in place, from the repo
+#        sudo smb-guard-doctor --restore [--dry-run]          # put the autofs files back
 # Some items are skipped when not root. The deployed copy exists so that the
 # mount's own doctor does not live on the mount it diagnoses; run it when the
-# workspace mount itself is in question.
+# workspace mount itself is in question — and that is also the copy --restore is
+# reached through when the mount is already gone.
+#
+# --restore has its own verdict: 0 = restored, or nothing to restore
+#                                1 = a restore step failed
+#                                2 = not root (nothing was attempted)
 
 set -u
 
+usage() {
+    cat >&2 <<'USAGE'
+usage: doctor.sh [--config <path>]                 inspect (read-only)
+       doctor.sh --restore [--dry-run] [--config <path>]
+                                                   put the autofs files back
+USAGE
+    exit 2
+}
+
 CONF=""
-[ "${1:-}" = "--config" ] && { CONF="${2:?--config requires a path}"; shift 2; }
+MODE="inspect"
+DRY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config)  [ $# -ge 2 ] || usage; CONF="$2"; shift 2 ;;
+        --restore) MODE="restore"; shift ;;
+        --dry-run) DRY=1; shift ;;
+        -h|--help) usage ;;
+        *) echo "unknown option: $1" >&2; usage ;;
+    esac
+done
+[ "$DRY" -eq 1 ] && [ "$MODE" != "restore" ] && {
+    echo "--dry-run only applies to --restore" >&2; usage; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -77,12 +127,32 @@ fi
 : "${SMBG_GUEST_ROOT:=}"
 : "${SMBG_EXPORT_ROOT:=}"
 : "${SMBG_REPO:=}"
+: "${SMBG_AUTOFS_MAP:=auto_smb}"
+: "${SMBG_AUTOMOUNT_TIMEOUT:=604800}"
 SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
+
+# ── autofs desired state ───────────────────────────────────────────────────
+# One source of truth for both the inspection and --restore. Holding them on the
+# same variables is what keeps the two from drifting apart (Principle 5) — a
+# restore that puts back something the inspection does not accept would loop
+# forever, and the reverse silently under-repairs.
+#
+# The map name and the timeout come from the configuration because they differ
+# per installation. The other three values do not: they are safety invariants,
+# and there is no reason to let a configuration weaken them.
+AUTOFS_MASTER="/etc/auto_master"
+AUTOFS_CONF="/etc/autofs.conf"
+AUTOFS_MAP="/etc/$SMBG_AUTOFS_MAP"
+AUTOFS_MASTER_LINE="$(printf '/-\t%s\t-nosuid' "$SMBG_AUTOFS_MAP")"
+AUTOMOUNTD_MNTOPTS_WANT="nosuid,nodev"
+AUTOMOUNTD_NOSUID_WANT="TRUE"
 
 GUARD_LABEL="$SMBG_LABEL_PREFIX.smb-guard"
 WATCH_LABEL="$SMBG_LABEL_PREFIX.sleepwatcher"
+SELF_LABEL="$SMBG_LABEL_PREFIX.selfcheck"
 GUARD_PLIST="/Library/LaunchDaemons/$GUARD_LABEL.plist"
 WATCH_PLIST="/Library/LaunchDaemons/$WATCH_LABEL.plist"
+SELF_PLIST="/Library/LaunchDaemons/$SELF_LABEL.plist"
 NEWSYSLOG="/etc/newsyslog.d/$SMBG_LABEL_PREFIX.smb.conf"
 
 OWNER_UID="$(id -u "$SMBG_OWNER" 2>/dev/null)" || {
@@ -158,34 +228,169 @@ drift() {
     fi
 }
 
+# ── --restore ──────────────────────────────────────────────────────────────
+# Scope and rationale are in the header. Only reached when --restore is given;
+# it never runs as part of an inspection.
+
+# Whether the last byte of a file is a newline. A file that does not end in one
+# would swallow an appended line into its last line — and /etc/auto_master is an
+# Apple-distributed file whose exact tail is not ours to assume.
+ends_with_newline() { [ -s "$1" ] && [ "$(tail -c 1 "$1" | wc -l)" -ne 0 ]; }
+
+# Atomic replacement rather than an in-place edit: a partial write to a file the
+# whole mount depends on is worse than no edit at all (Principle 20). install(1)
+# is what host/install.sh uses, so owner and mode are stated explicitly instead
+# of being inherited from a temporary file.
+replace_file() {   # replace_file <staged> <target> <mode>
+    local staged="$1" target="$2" mode="$3" bak
+    if [ -e "$target" ]; then
+        bak="$target.bak.$(date +%s)"
+        cp -p "$target" "$bak" || return 1
+        printf '  -> %s updated (backup: %s)\n' "$target" "$bak"
+    else
+        printf '  -> %s created\n' "$target"
+    fi
+    install -o root -g wheel -m "$mode" "$staged" "$target"
+}
+
+# Read the effective (uncommented) value of a key from autofs.conf. Mirrors what
+# the inspection reads, so both sides agree on what "the current value" is.
+conf_value() {   # conf_value <key>
+    sed -n "s/^$1=//p" "$AUTOFS_CONF" 2>/dev/null | tail -1
+}
+
+# Rewrite one key: replace the first uncommented occurrence in place, drop any
+# further duplicates, append if absent. Commented lines are left alone — they are
+# Apple's documentation of the defaults, not settings.
+stage_conf_key() {   # stage_conf_key <in> <out> <key> <value>
+    awk -v key="$3" -v val="$4" '
+        $0 ~ "^"key"=" { if (!done) { print key "=" val; done = 1 } ; next }
+        { print }
+        END { if (!done) print key "=" val }
+    ' "$1" > "$2"
+}
+
+restore_autofs() {
+    if [ "$IS_ROOT" -ne 1 ]; then
+        echo "--restore needs root: sudo $0 --restore" >&2
+        return 2
+    fi
+
+    local stage need_master=0 need_conf=0 changed=0 cur staged
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/smb-guard-restore.XXXXXX")" || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '$stage'" EXIT
+
+    section "autofs restore"
+
+    # 1. the direct map line in /etc/auto_master
+    if grep -Eq "^/-[[:space:]]+$SMBG_AUTOFS_MAP([[:space:]]|\$)" "$AUTOFS_MASTER" 2>/dev/null; then
+        printf '  ok    %s: direct map line present\n' "$AUTOFS_MASTER"
+    else
+        printf '  FIX   %s: no direct map line for %s\n' "$AUTOFS_MASTER" "$SMBG_AUTOFS_MAP"
+        printf '        + %s\n' "$AUTOFS_MASTER_LINE"
+        need_master=1; changed=$((changed + 1))
+    fi
+
+    # 2. the three keys in /etc/autofs.conf
+    for kv in "AUTOMOUNT_TIMEOUT=$SMBG_AUTOMOUNT_TIMEOUT" \
+              "AUTOMOUNTD_MNTOPTS=$AUTOMOUNTD_MNTOPTS_WANT" \
+              "AUTOMOUNTD_NOSUID=$AUTOMOUNTD_NOSUID_WANT"; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        cur="$(conf_value "$k")"
+        if [ "$cur" = "$v" ]; then
+            printf '  ok    %s=%s\n' "$k" "$v"
+        else
+            printf '  FIX   %s=%s (expected %s)\n' "$k" "${cur:-<unset>}" "$v"
+            need_conf=1; changed=$((changed + 1))
+        fi
+    done
+
+    if [ "$changed" -eq 0 ]; then
+        printf '\nNothing to restore.\n'
+        return 0
+    fi
+    if [ "$DRY" -eq 1 ]; then
+        printf '\n(--dry-run — nothing was written, nothing was applied)\n'
+        return 0
+    fi
+
+    if [ "$need_master" -eq 1 ]; then
+        staged="$stage/auto_master"
+        : > "$staged"
+        if [ -e "$AUTOFS_MASTER" ]; then
+            cat "$AUTOFS_MASTER" > "$staged" || return 1
+            ends_with_newline "$staged" || printf '\n' >> "$staged"
+        fi
+        printf '%s\n' "$AUTOFS_MASTER_LINE" >> "$staged"
+        replace_file "$staged" "$AUTOFS_MASTER" 644 || return 1
+    fi
+
+    if [ "$need_conf" -eq 1 ]; then
+        staged="$stage/autofs.conf"
+        if [ -e "$AUTOFS_CONF" ]; then cp "$AUTOFS_CONF" "$staged" || return 1
+        else : > "$staged"
+        fi
+        for kv in "AUTOMOUNT_TIMEOUT=$SMBG_AUTOMOUNT_TIMEOUT" \
+                  "AUTOMOUNTD_MNTOPTS=$AUTOMOUNTD_MNTOPTS_WANT" \
+                  "AUTOMOUNTD_NOSUID=$AUTOMOUNTD_NOSUID_WANT"; do
+            stage_conf_key "$staged" "$stage/next" "${kv%%=*}" "${kv#*=}" || return 1
+            mv "$stage/next" "$staged" || return 1
+        done
+        replace_file "$staged" "$AUTOFS_CONF" 644 || return 1
+    fi
+
+    # Editing the files does not apply them — the values are baked in when the
+    # trigger is regenerated (docs/install.md). Stopping at the edit would report
+    # a success the runtime does not share (Principle 9). Note that this
+    # regenerates every autofs map on the system, not just ours.
+    printf '  -> applying with automount -vc (regenerates all autofs maps)\n'
+    out="$(automount -vc 2>&1)" || {
+        printf '  FAIL  automount -vc failed: %s\n' "$out" >&2
+        return 1
+    }
+
+    printf '\n%s item(s) restored and applied.\n' "$changed"
+    printf 'Next:  sudo %s            # confirm\n' "$0"
+    printf '       sudo %s --ensure   # bring the mount back\n' "/usr/local/sbin/smb-guard"
+    return 0
+}
+
+if [ "$MODE" = "restore" ]; then
+    echo "smb-guard doctor --restore — configuration $CONF"
+    restore_autofs
+    exit $?
+fi
+
 echo "smb-guard doctor — configuration $CONF"
 [ "$IS_ROOT" -eq 1 ] || echo "(not root — some items are skipped. For a complete verdict: sudo $0)"
 
 # ── 1. autofs — not install-managed, highest risk of upgrade reversion ─────
 section "autofs (docs/install.md 'autofs configuration')"
 
-if grep -Eq '^/-[[:space:]]+auto_smb([[:space:]]|$)' /etc/auto_master 2>/dev/null; then
-    ok "/etc/auto_master direct map line"
+if grep -Eq "^/-[[:space:]]+$SMBG_AUTOFS_MAP([[:space:]]|\$)" "$AUTOFS_MASTER" 2>/dev/null; then
+    ok "$AUTOFS_MASTER direct map line"
 else
-    fail "/etc/auto_master has no auto_smb direct map line — suspect upgrade reversion" \
-         "add '/-    auto_smb    -nosuid' then sudo automount -vc"
+    fail "$AUTOFS_MASTER has no $SMBG_AUTOFS_MAP direct map line — suspect upgrade reversion" \
+         "sudo $0 --restore"
 fi
 
-if [ ! -e /etc/auto_smb ]; then
-    fail "/etc/auto_smb missing" "recreate via the docs/install.md 'autofs configuration' procedure"
+if [ ! -e "$AUTOFS_MAP" ]; then
+    # Not a --restore target: this file holds the credentials, so a human writes it.
+    fail "$AUTOFS_MAP missing" "recreate via the docs/install.md 'autofs configuration' procedure"
 else
-    st="$(stat -f '%Su %Lp' /etc/auto_smb 2>/dev/null)"
+    st="$(stat -f '%Su %Lp' "$AUTOFS_MAP" 2>/dev/null)"
     if [ "$st" = "root 600" ]; then
-        ok "/etc/auto_smb (root 600)"
+        ok "$AUTOFS_MAP (root 600)"
     else
         # The URL contains credentials — readable by another user means leaked.
-        fail "/etc/auto_smb wrong owner/permissions: $st (expected root 600 — the file contains credentials)" \
-             "sudo chown root /etc/auto_smb && sudo chmod 600 /etc/auto_smb"
+        fail "$AUTOFS_MAP wrong owner/permissions: $st (expected root 600 — the file contains credentials)" \
+             "sudo chown root $AUTOFS_MAP && sudo chmod 600 $AUTOFS_MAP"
     fi
-    if [ -r /etc/auto_smb ]; then
-        map_line="$(awk -v mp="$SMBG_MP" '$1 == mp {print; exit}' /etc/auto_smb)"
+    if [ -r "$AUTOFS_MAP" ]; then
+        map_line="$(awk -v mp="$SMBG_MP" '$1 == mp {print; exit}' "$AUTOFS_MAP")"
         if [ -z "$map_line" ]; then
-            fail "/etc/auto_smb has no entry for $SMBG_MP"
+            fail "$AUTOFS_MAP has no entry for $SMBG_MP"
         else
             opts="$(printf '%s\n' "$map_line" | awk '{print $2}')"
             url="$(printf '%s\n' "$map_line" | awk '{print $3}')"
@@ -214,29 +419,47 @@ else
             esac
         fi
     else
-        skip "/etc/auto_smb content check (needs root)"
+        skip "$AUTOFS_MAP content check (needs root)"
     fi
 fi
 
-tmo="$(sed -n 's/^AUTOMOUNT_TIMEOUT=//p' /etc/autofs.conf 2>/dev/null | tail -1)"
-case "$tmo" in
-    '')       fail "AUTOMOUNT_TIMEOUT not set — Apple's default 3600 = the expiry window is back (Layer 0)" \
-                   "set AUTOMOUNT_TIMEOUT=604800 in /etc/autofs.conf then sudo automount -vc" ;;
-    *[!0-9]*) warn "AUTOMOUNT_TIMEOUT='$tmo' — not a number" ;;
-    *) if [ "$tmo" -lt 86400 ]; then
-           warn "AUTOMOUNT_TIMEOUT=$tmo — the expiry window is under a day" \
-                "confirm this is intended (the docs recommend 604800)"
-       else
-           ok "AUTOMOUNT_TIMEOUT=$tmo"
-       fi ;;
-esac
+# The three /etc/autofs.conf keys. They are judged against the expected value
+# rather than against a threshold: an upgrade reverting the file and an operator
+# deliberately choosing a different value are different events, and only the
+# configured expectation separates them. A threshold ("under a day") folded the
+# two together and demoted a reversion to a WARN, where the exit code could not
+# see it.
+tmo="$(sed -n 's/^AUTOMOUNT_TIMEOUT=//p' "$AUTOFS_CONF" 2>/dev/null | tail -1)"
+if [ "$tmo" = "$SMBG_AUTOMOUNT_TIMEOUT" ]; then
+    ok "AUTOMOUNT_TIMEOUT=$tmo"
+elif [ -z "$tmo" ]; then
+    fail "AUTOMOUNT_TIMEOUT not set — Apple's default 3600 applies, the expiry window is back (Layer 0)" \
+         "sudo $0 --restore"
+else
+    fail "AUTOMOUNT_TIMEOUT=$tmo, expected $SMBG_AUTOMOUNT_TIMEOUT — suspect upgrade reversion (Layer 0)" \
+         "sudo $0 --restore   (or set SMBG_AUTOMOUNT_TIMEOUT in $CONF if $tmo is intended)"
+fi
+
+mno="$(sed -n 's/^AUTOMOUNTD_MNTOPTS=//p' "$AUTOFS_CONF" 2>/dev/null | tail -1)"
+if [ "$mno" = "$AUTOMOUNTD_MNTOPTS_WANT" ]; then
+    ok "AUTOMOUNTD_MNTOPTS=$mno"
+else
+    fail "AUTOMOUNTD_MNTOPTS='${mno:-<unset>}', expected $AUTOMOUNTD_MNTOPTS_WANT" "sudo $0 --restore"
+fi
+
+nsu="$(sed -n 's/^AUTOMOUNTD_NOSUID=//p' "$AUTOFS_CONF" 2>/dev/null | tail -1)"
+if [ "$nsu" = "$AUTOMOUNTD_NOSUID_WANT" ]; then
+    ok "AUTOMOUNTD_NOSUID=$nsu"
+else
+    fail "AUTOMOUNTD_NOSUID='${nsu:-<unset>}', expected $AUTOMOUNTD_NOSUID_WANT" "sudo $0 --restore"
+fi
 
 # ── 2. Deployed files — install-managed, blanket remedy is a reinstall ─────
 section "deployed files (the host/install.sh managed area)"
 
 check_file "$DEPLOY_CONF"                     root:wheel 644 && drift "$DEPLOY_CONF" "$REPOD/smb-guard.conf"
 check_file /usr/local/lib/smb-guard/common.sh root:wheel 644 && drift /usr/local/lib/smb-guard/common.sh "$REPOD/host/lib/common.sh"
-for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix; do
+for f in smb-guard smb-guard-sleep smb-guard-wakeup smbfix smb-guard-selfcheck; do
     check_file "/usr/local/sbin/$f" root:wheel 755 && drift "/usr/local/sbin/$f" "$REPOD/host/sbin/$f"
 done
 # The doctor's own deployed copy. Missing is a WARN, not a FAIL — its absence
@@ -250,6 +473,7 @@ else
 fi
 check_file "$GUARD_PLIST" root:wheel 644
 check_file "$WATCH_PLIST" root:wheel 644
+check_file "$SELF_PLIST"  root:wheel 644
 check_file "$NEWSYSLOG"   root:wheel 644
 check_file "$SMBG_LOGDIR" root:wheel 755
 
@@ -314,9 +538,21 @@ if [ "$IS_ROOT" -eq 1 ]; then
         fail "$WATCH_LABEL loaded but not resident — the sleep/wake hooks are dead" \
              "check the log: $SMBG_LOGDIR/sleepwatcher.launchd.log"
     fi
+    # The periodic self-check. It is what notices a reversion without anyone
+    # remembering to look, so its own load state is the one item whose failure is
+    # silent by construction — nothing else reports that the reporter is dead.
+    if launchctl print "system/$SELF_LABEL" >/dev/null 2>&1; then
+        ok "$SELF_LABEL loaded (state 'not running' is normal — it runs on an interval)"
+    elif [ -e "$SELF_PLIST" ]; then
+        fail "$SELF_LABEL: plist present but not loaded — suspect a BTM approval reset" \
+             "check System Settings > General > Login Items, then sudo launchctl bootstrap system $SELF_PLIST"
+    else
+        fail "$SELF_LABEL not installed" "sudo ./host/install.sh"
+    fi
 else
     skip "$GUARD_LABEL load state (needs root)"
     skip "$WATCH_LABEL residency (needs root)"
+    skip "$SELF_LABEL load state (needs root)"
 fi
 
 # A leftover user-domain agent created by brew makes the hooks fire twice
@@ -339,11 +575,14 @@ ns_out="$(newsyslog -nv 2>/dev/null)"
 if [ -z "$ns_out" ]; then
     skip "cannot run newsyslog -nv (may need root)"
 else
+    # One per line in host/newsyslog.d/smb.conf.in: smb-guard.log and the three
+    # launchd capture files (guard, sleepwatcher, selfcheck).
+    NS_EXPECT=4
     n="$(printf '%s\n' "$ns_out" | grep -Fc "$SMBG_LOGDIR/")"
-    if [ "$n" -eq 3 ]; then
-        ok "3 rotation targets registered"
+    if [ "$n" -eq "$NS_EXPECT" ]; then
+        ok "$NS_EXPECT rotation targets registered"
     else
-        fail "${n} rotation target(s) (expected 3) — the configuration is being silently ignored" \
+        fail "${n} rotation target(s) (expected $NS_EXPECT) — the configuration is being silently ignored" \
              "check root:wheel 644 with ls -l $NEWSYSLOG"
     fi
 fi

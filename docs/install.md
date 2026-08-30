@@ -37,10 +37,27 @@
   This repo does not touch `/etc/fstab` (the same policy as not touching autofs).
   `guest/install.sh` only checks, and stops with the commands above if it is missing.
 
-### autofs configuration — what this repo does not touch
+### autofs configuration — written by hand, restored by the doctor
 
 The mount itself belongs to autofs; smb-guard operates on top of it. Get these three
 files right first.
+
+**The contract, precisely.** `install.sh` never creates or edits these files: the
+map holds credentials, and their initial contents are a decision about this
+machine. But two of the three are Apple-distributed, so **a macOS major upgrade
+reverts them** — and a reinstall cannot put back what the install never deployed.
+That gap is covered from the other side:
+
+```bash
+sudo smb-guard-doctor --restore        # the /- line and the three autofs.conf keys
+sudo smb-guard-doctor --restore --dry-run
+```
+
+`--restore` puts back **only** the direct map line in `/etc/auto_master` and the
+three keys in `/etc/autofs.conf`, then applies them. It never touches
+`/etc/auto_smb` (credentials), never changes any file's owner or mode
+(Principle 21), and never mounts anything. Writing the map for the first time is
+still the procedure below.
 
 ```text
 # /etc/auto_master  — register the direct map
@@ -83,7 +100,14 @@ AUTOMOUNTD_NOSUID=TRUE
 
 **Editing the files alone does not apply them.** The values are baked in when the
 trigger is regenerated, so `sudo automount -vc` is mandatory. Note that
-`AUTOMOUNT_TIMEOUT` is a global setting.
+`AUTOMOUNT_TIMEOUT` is a global setting. (`--restore` runs `automount -vc` itself
+for this reason — an edit that was never applied is a success the runtime does not
+share.)
+
+`AUTOMOUNT_TIMEOUT` is judged against `SMBG_AUTOMOUNT_TIMEOUT` from the
+configuration, not against a threshold. A shorter window chosen on purpose and a
+window Apple reverted to 3600 are different events, and only the stated
+expectation separates them.
 
 ---
 
@@ -131,6 +155,7 @@ ones are silently ignored.
 | `tools/doctor.sh` | `/usr/local/sbin/smb-guard-doctor` | `root:wheel 755` | without it, a dead mount takes its own diagnostic tool down with it |
 | `host/LaunchDaemons/smb-guard.plist.in` | `/Library/LaunchDaemons/<prefix>.smb-guard.plist` | `root:wheel 644` | **launchd refuses to load it** |
 | `host/LaunchDaemons/sleepwatcher.plist.in` | `/Library/LaunchDaemons/<prefix>.sleepwatcher.plist` | `root:wheel 644` | same |
+| `host/LaunchDaemons/selfcheck.plist.in` | `/Library/LaunchDaemons/<prefix>.selfcheck.plist` | `root:wheel 644` | same — and nothing else reports that the reporter is missing |
 | `host/newsyslog.d/smb.conf.in` | `/etc/newsyslog.d/<prefix>.smb.conf` | `root:wheel 644` | **silently ignored — the log grows without bound** |
 
 The `*.in` files are templates. Replace `@LABEL_PREFIX@`, `@LOGDIR@` and
@@ -180,10 +205,17 @@ first.**
 ```bash
 sudo smb-guard-doctor           # deployed copy — use this when the mount itself is in question
 sudo ./tools/doctor.sh          # 0 healthy / 1 faults / 2 verdict incomplete (root-only items skipped)
+sudo smb-guard-doctor --restore # the one thing it does fix: the autofs files (see Prerequisites)
 ```
 
-It fixes nothing and only prints the per-item remedy (Principle 21). **Two things it
-does not replace**: whether the autofs configuration has been *applied*
+It also runs on its own every `SMBG_SELFCHECK_INTERVAL` seconds, through the
+selfcheck LaunchDaemon, so a reversion does not wait to be noticed. That job
+reports and never remediates: faults go to the log, and to a notification in the
+owner's GUI session when there is one.
+
+Inspection fixes nothing and only prints the per-item remedy (Principle 21);
+`--restore` is a separate mode with the narrow scope stated above. **Two things
+inspection does not replace**: whether the autofs configuration has been *applied*
 (`automount -vc`) and whether the mount hook is actually armed cannot be determined
 read-only. Items 2, 4 and 6 below still have to be checked by hand. For the detailed
 criteria see [tools/README.md](../tools/README.md).
@@ -205,6 +237,24 @@ sudo launchctl print system/<prefix>.sleepwatcher | grep -Ei 'state|last exit'
 
 sudo launchctl print system/<prefix>.smb-guard | grep -Ei 'state|last exit|runs'
 #  expected: state = not running / last exit code = 0
+
+sudo launchctl print system/<prefix>.selfcheck | grep -Ei 'state|last exit|runs'
+#  expected: state = not running / last exit code = 0   (it runs on an interval)
+```
+
+The self-check is an alarm, so verify it in **both** directions (Principle 23) —
+an alarm that fires when nothing is wrong gets ignored when something is:
+
+```bash
+sudo launchctl kickstart -k system/<prefix>.selfcheck
+#  expected on a healthy machine: no notification, no new line in smb-guard.log
+
+# then break one thing on purpose and repeat
+sudo cp /etc/auto_master /etc/auto_master.probe
+sudo sed -i '' '/^\/-[[:space:]]*auto_smb/d' /etc/auto_master
+sudo launchctl kickstart -k system/<prefix>.selfcheck
+#  expected: a notification, and the doctor output in smb-guard.log
+sudo smb-guard-doctor --restore     # and this puts it back
 ```
 
 **`not running` is the healthy state.** launchd's state only tells you "is a process

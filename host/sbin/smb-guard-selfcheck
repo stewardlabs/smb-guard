@@ -1,0 +1,87 @@
+#!/bin/bash
+# /usr/local/sbin/smb-guard-selfcheck
+# Periodic survival check. Launched by the selfcheck LaunchDaemon (RunAtLoad +
+# StartInterval) — never on the critical path of a mount.
+#
+# Why this exists: the failures this system is built against are the ones nobody
+# is looking at. A macOS major upgrade reverts /etc/auto_master and
+# /etc/autofs.conf, and a BTM approval reset leaves a LaunchDaemon "present but
+# not loaded" — both silent until the mount is next needed. Until this job
+# existed, the only path to noticing was a human remembering to run the doctor
+# right after an upgrade, which is exactly the kind of premise Principle 1 says
+# not to assume is holding.
+#
+# It does not remediate. It runs the doctor (read-only), and when the doctor
+# reports a fault it writes to the log and raises a notification in the owner's
+# GUI session. Restoring is still a human decision — one command:
+#   sudo smb-guard-doctor --restore
+#
+# Why notify on a filtered subset rather than on the doctor's exit code: the
+# doctor also checks the guest (ssh, testparm). A guest that is simply powered
+# off would fail those and produce a notification every interval, and an alarm
+# that cries wolf is worse than no alarm — the next real one is ignored too
+# (Principle 23). So the notification trigger is the two host-side sections that
+# cannot be false positives here: autofs and launchd.
+# The full doctor output still goes to the log either way, so nothing is lost.
+
+set -u
+
+SMBG_TAG="selfcheck"
+# shellcheck source=/dev/null
+. /usr/local/lib/smb-guard/common.sh
+
+DOCTOR="/usr/local/sbin/smb-guard-doctor"
+
+if [ ! -x "$DOCTOR" ]; then
+    # The reporter cannot report on itself being absent — say so once per run.
+    log "doctor not deployed at $DOCTOR — cannot self-check (re-run host/install.sh)"
+    exit 0
+fi
+
+out="$("$DOCTOR" 2>&1)"
+rc=$?
+
+if [ "$rc" -eq 0 ]; then
+    # Healthy runs stay silent. A daily "everything is fine" line would bury the
+    # one line that matters under 364 that do not.
+    exit 0
+fi
+
+# Faults the owner can act on right now, and that a powered-off guest cannot fake.
+# The section headers are the doctor's own ('== autofs ==', '== launchd … =='),
+# so this filter follows the doctor's output format — see the caution about log
+# strings being an observation channel in CLAUDE.md.
+acted="$(printf '%s\n' "$out" | awk '
+    /^== / { insec = ($0 ~ /^== (autofs|launchd)/) ; next }
+    insec && /^  FAIL  / { sub(/^  FAIL  /, ""); print }
+')"
+
+log "doctor exit=$rc"
+printf '%s\n' "$out" | sed 's/^/    /' >> "$SMBG_LOG" 2>/dev/null
+
+[ -n "$acted" ] || exit 0
+
+n="$(printf '%s\n' "$acted" | wc -l | tr -d ' ')"
+first="$(printf '%s\n' "$acted" | head -1)"
+
+log "actionable: $n item(s), first: $first"
+
+# The notification is a best-effort channel: it needs a GUI session, and
+# osascript can be denied by TCC without saying so. The log above is the record;
+# this is only the nudge. Never let its failure change this job's exit status.
+if smbg_session_active; then
+    body="$first"
+    [ "$n" -gt 1 ] && body="$first (+$((n - 1)) more)"
+    smbg_in_session /usr/bin/osascript \
+        -e 'on run {b}' \
+        -e 'display notification b with title "smb-guard" subtitle "run: sudo smb-guard-doctor --restore"' \
+        -e 'end run' \
+        "$body" >/dev/null 2>&1 \
+        || log "notification failed (osascript) — the log above is the record"
+else
+    # Expected at boot before login, and at the login window (Principle 15:
+    # an expected failure has to say it is expected).
+    log "no GUI session for $SMBG_OWNER — logged only, will notify at the next interval"
+fi
+
+exit 0

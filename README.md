@@ -57,6 +57,7 @@ detail and the measurements see
 | `smb-guard-sleep` | host | just before sleep | records the time of the last sleep (nothing else) |
 | `smb-guard-wakeup` | host | wake | wait for network -> correct the clock -> assure the mount -> check liveness |
 | `smbfix` | host | a human | the manual tool for when automatic recovery has failed |
+| `smb-guard-selfcheck` | host | at load and on an interval | runs the doctor and reports — so a macOS upgrade reverting the autofs files is not found by chance |
 | `clockfix` | guest | called over ssh by the host hook | clock step right after resume |
 | `mac-cruft-cleanup` | guest | systemd timer (15 min) | post-hoc reclamation of macOS cruft |
 
