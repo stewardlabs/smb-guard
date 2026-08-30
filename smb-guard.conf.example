@@ -122,6 +122,22 @@ SMBG_GUEST_ROOT="/srv/workspace"
 # sleep-transition darkwake and handling is skipped entirely.
 #SMBG_SLEEP_GATE=30
 
+# Name of the autofs direct map file under /etc. Both the doctor's inspection and
+# `--restore` use it, for the map itself and for the `/-` line in /etc/auto_master.
+#SMBG_AUTOFS_MAP="auto_smb"
+
+# Expected AUTOMOUNT_TIMEOUT in /etc/autofs.conf. The doctor judges against this
+# value rather than a threshold, which is what separates "an upgrade reverted the
+# file to Apple's 3600" from "the operator chose a shorter window on purpose" —
+# the first is a fault, the second is not. `--restore` writes this value back.
+# The default removes the expiry window entirely (docs/failure-model.md Layer 0).
+#SMBG_AUTOMOUNT_TIMEOUT=604800
+
+# How often (seconds) the selfcheck LaunchDaemon runs the doctor. It only reports;
+# it never remediates. Faults always reach the log, and reach the owner's GUI
+# session as a notification when one exists.
+#SMBG_SELFCHECK_INTERVAL=86400
+
 # Optional user hook to open in the owner's GUI session at wake. For things
 # unrelated to this system that you nonetheless want handled at wake time, such as
 # an app that mounts local volumes. It runs only if the path exists, and is a no-op

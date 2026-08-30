@@ -152,6 +152,65 @@ root-only items were skipped) is an application of Principle 25. Reading the sil
 of a skipped item as healthy would make the inspection tool itself fall into the
 "silence means two different things" trap.
 
+### Let the doctor restore the autofs files, and nothing else
+
+The decision above leaves a hole it does not close: inspection tells you the map
+line is gone, and then every upgrade is repaired by hand. The repair is mechanical
+and the desired state is already written down in the tool that detects the fault,
+so leaving it to a human is not caution, it is a chore with a chance of typos in
+`/etc`.
+
+**Why this does not overrule Principle 21.** That principle is about *permissions*:
+"fixing" a file that has been silently ignored because its mode was wrong opens a
+privilege that was never granted. Restoring the *content* of a file grants nothing
+new — it puts back a line a human approved once and an upgrade reverted. Applying
+Principle 19: the read-only rule rests on the permission argument, and that argument
+does not reach file content, so the boundary is drawn explicitly rather than by
+extending 21 past its ground. `--restore` therefore never changes any file's owner
+or mode; that half stays exactly as it was.
+
+**Why the doctor and not a second tool.** The desired state — the map name, the
+`/-` line, the three `autofs.conf` keys — already lives in the doctor. A separate
+restore tool would hold a second copy of it, and the two would drift (Principle 5);
+worse, they would drift *silently*, since a restore that writes something the
+inspection does not accept looks like a repair that never takes. Sharing one set of
+variables makes that class of bug unrepresentable. Putting it in `install.sh`
+instead was rejected for the reason directly above: that script's remit is what it
+deployed, and the autofs files are deliberately not that.
+
+**Why it applies with `automount -vc` rather than printing the command.** Editing
+these files does not change the runtime; the values are baked in when the trigger is
+regenerated. Stopping at the edit would report a success the running system does not
+share (Principle 9).
+
+`--restore` does not run the inspection first. The two modes have different
+subjects — one is the whole host, the other is two files — and folding them together
+would mean a guest that happens to be powered off makes noise inside a repair.
+
+### Have something other than a human's memory notice the reversion
+
+`--restore` shortens the repair, but the *discovery* was still "someone remembers to
+run the doctor after an upgrade". That is a premise about attention, and this system
+exists because premises about attention do not hold (Principle 1). The
+`selfcheck` LaunchDaemon runs the doctor on an interval and at load, and reports.
+
+**It reports and never remediates**, which is the same split as everywhere else here
+— determination and remediation stay separate agents, and an automatic repair would
+also erase the signal that a reversion happened at all. Watching how macOS behaves
+across upgrades is worth more than the few seconds the repair costs.
+
+**It notifies on a filtered subset, not on the doctor's exit code.** The doctor also
+checks the guest over ssh; a guest that is simply switched off would fail those and
+produce a notification every interval. An alarm that cries wolf is worse than no
+alarm, because the next real one is ignored too (Principle 23) — so the trigger is
+the two host-side sections that cannot be false positives from the guest being
+absent: autofs and launchd. The complete output still reaches the log regardless.
+
+`StartInterval` rather than `StartCalendarInterval`: a calendar entry that falls
+while the machine is asleep is skipped outright, while an interval fires shortly
+after wake. On a desktop that sleeps, a fixed time of day is the less reliable of
+the two.
+
 ### Abolish blocking and replace it with post-hoc cleanup
 
 The requirement was not "block it" but "it does not remain". The detail and the

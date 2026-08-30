@@ -21,7 +21,8 @@ single most common misjudgement in this system.
 | steps while awake | `journalctl -u chrony \| grep -i stepped` | **0.** Its appearance means the resume step was late |
 | host clock health | `sntp time.apple.com`, monthly | tens of milliseconds. Being off by seconds means setting the guest wrong |
 | SMB session leaks | `sudo smbstatus -b` on the guest, once or twice a week | the session count is not monotonically increasing |
-| configuration survival | `sudo smb-guard-doctor` **right after a major OS upgrade** | exit code 0. An upgrade can revert the autofs trio to defaults, or reset BTM approval and leave a job "file present but not loaded" |
+| configuration survival | the `selfcheck` job runs `smb-guard-doctor` at load and every `SMBG_SELFCHECK_INTERVAL`; check by hand too **right after a major OS upgrade** | exit code 0. An upgrade can revert the autofs trio to defaults, or reset BTM approval and leave a job "file present but not loaded". The autofs half is repaired with `sudo smb-guard-doctor --restore` |
+| the reporter itself | `sudo launchctl print system/<prefix>.selfcheck` | loaded. Nothing else reports that the thing that reports is dead |
 
 ### When you have to look at the event source
 

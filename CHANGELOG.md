@@ -7,6 +7,52 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.6.0] — 2026-08-30
+
+### Added
+
+- **doctor: `--restore` for the autofs files.** A macOS major upgrade reverts
+  `/etc/auto_master` and `/etc/autofs.conf` to Apple's defaults, and the
+  installer cannot put back what it never deployed — so until now every upgrade
+  was repaired by hand in `/etc`. `--restore` puts back the `/-` direct map line
+  and the three `autofs.conf` keys, then applies them with `automount -vc`
+  (an edit that was never applied is a success the runtime does not share).
+  Scope is deliberately narrow: it never changes any file's owner or mode, never
+  touches `/etc/auto_smb` (credentials), and never mounts anything.
+  Principle 21 governs **permissions**, and restoring file content grants no
+  privilege that was not granted before — the boundary is drawn explicitly in
+  decisions.md rather than by extending that principle past its ground.
+  `--dry-run` shows the changes without writing. Inspection and restore share one
+  set of desired-state variables, so the two cannot drift apart
+- **`smb-guard-selfcheck` and its LaunchDaemon.** Discovery of a reversion no
+  longer depends on someone remembering to run the doctor after an upgrade
+  (Principle 1 — a premise about attention is not a premise that holds). It runs
+  the doctor at load and every `SMBG_SELFCHECK_INTERVAL` seconds, reports, and
+  never remediates. Notification is raised only for FAILs in the **autofs and
+  launchd** sections: the guest checks would fail whenever the guest is switched
+  off, and an alarm that cries wolf is ignored when it matters (Principle 23).
+  The full output always reaches the log. `StartInterval`, not
+  `StartCalendarInterval` — a calendar entry falling during sleep is skipped
+  outright, an interval fires shortly after wake
+- **doctor: `AUTOMOUNTD_MNTOPTS` and `AUTOMOUNTD_NOSUID` checks.** Both are
+  documented as required in install.md but neither was inspected
+
+### Changed
+
+- **doctor: `AUTOMOUNT_TIMEOUT` is judged against the expected value, not a
+  threshold.** The 2026-08-30 upgrade reverted it to Apple's 3600 and the
+  "under a day" threshold reported that as a WARN, where the exit code could not
+  see it. It is now compared with `SMBG_AUTOMOUNT_TIMEOUT` and fails on a
+  mismatch, which also separates a deliberately shorter window from a reversion
+- **doctor: the newsyslog target count is 4** (the selfcheck launchd capture file
+  joins the rotation)
+
+### Configuration
+
+- New optional keys, all with defaults that preserve current behaviour:
+  `SMBG_AUTOFS_MAP` (`auto_smb`), `SMBG_AUTOMOUNT_TIMEOUT` (`604800`),
+  `SMBG_SELFCHECK_INTERVAL` (`86400`)
+
 ## [1.5.0] — 2026-08-19
 
 ### Added

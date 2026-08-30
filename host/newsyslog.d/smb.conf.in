@@ -14,3 +14,4 @@
 @LOGDIR@/smb-guard.log               root:wheel     644   7      1024  *     GJ
 @LOGDIR@/smb-guard.launchd.log       root:wheel     644   4      512   *     GJ
 @LOGDIR@/sleepwatcher.launchd.log    root:wheel     644   4      512   *     GJ
+@LOGDIR@/selfcheck.launchd.log       root:wheel     644   4      512   *     GJ
