@@ -153,6 +153,15 @@ symptoms from re-testing a hypothesis that has already been refuted.
 > [decisions.md](docs/decisions.md). Nothing you need in order to use, install or
 > debug this is only in there.
 
+> **A note on authorship.** Every commit here was written with AI assistance
+> (Claude Code), then reviewed and merged by a human maintainer. Individual
+> commits carry no `Assisted-by:` or `Co-Authored-By:` trailer: a label that is
+> true of every commit distinguishes none of them, so this note says once what a
+> per-commit trailer would repeat without adding information. Responsibility for
+> every line is the maintainer's, and the measurements in
+> [docs/failure-model.md](docs/failure-model.md) are observations from the real
+> setup rather than anything a model asserted.
+
 ## License
 
 [MIT](LICENSE)
