@@ -133,11 +133,22 @@ channel itself is visible at `log level = 10` in the smbd log as
 ### git on the Mac — filemode
 
 With the NFS ACE channel disarmed, the Mac's smbfs displays a synthetic mode
-(`rwx------`) for everything, and a Mac-side `chmod` is a silent no-op. Two
+(`rwx------`) for everything, and a Mac-side `chmod` is a silent no-op. Three
 operational consequences:
 
 - **Mode changes (`chmod +x` included) are made on the guest.** The Mac's exit 0
   means nothing landed.
+- **A Mac-side write that *replaces* the file drops the server-side x bit.**
+  `git checkout` and `git pull`, and any editor or agent tool that writes a new
+  file and swaps it in, leave the worktree copy at 644 — the file then runs from
+  neither side. An in-place overwrite keeps the mode (measured: `cp` onto the
+  existing path), so the outcome turns on how the tool writes, which the caller
+  usually cannot tell: treat any work touching an executable as guest-side work.
+  **The Mac cannot see it happen.** With `core.filemode = false` its
+  `git status` stays clean while the guest reports `M` against the 100755 index
+  entry — a silent failure on the side that caused it, so judge it on the guest.
+  Remedy: a guest-side `chmod +x`, or `git checkout -- <path>` from the guest
+  (measured: 644 -> 755, tree clean).
 - **Authoring a new executable from the Mac needs an explicit index mode — and
   it is a two-step.** A Mac-side `git add` records 100644 whatever the intent
   (filemode is off there, and a Mac-side `chmod +x` lands nowhere), so run
