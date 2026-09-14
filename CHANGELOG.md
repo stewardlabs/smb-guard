@@ -7,6 +7,20 @@ In this project **the unit of compatibility is the configuration file**
 (`smb-guard.conf`) and the deployment paths. Removing a configuration key or
 changing its meaning, and moving a deployment path, are major changes.
 
+## [1.6.1] — 2026-09-14
+
+### Fixed
+
+- operations.md 'git on the Mac — filemode': the section covered mode changes
+  and **authoring** a new executable, but never what happens to an **existing**
+  tracked executable when the Mac rewrites it. `git checkout`/`pull`, and any
+  tool that swaps in a newly written file, drop the server-side x bit to 644 and
+  the file stops running from either side; an in-place overwrite keeps the mode,
+  so the outcome turns on how the tool writes. The Mac's own `git status` stays
+  clean throughout while the guest reports `M` — the side that causes it is the
+  side that cannot see it. Added the case, the distinction, and the guest-side
+  remedies.
+
 ## [1.6.0] — 2026-08-30
 
 ### Added
