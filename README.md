@@ -99,6 +99,7 @@ $EDITOR smb-guard.conf          # account, mount point, guest alias, share name
 
 ./install.sh --dry-run          # see what goes where first
 ./install.sh                    # host (sudo) -> guest (ssh -t sudo)
+./uninstall.sh                  # the mirror: removes exactly what install.sh placed
 ```
 
 Run `install.sh` **as a normal user.** Privilege elevation happens separately at

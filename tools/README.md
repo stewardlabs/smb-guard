@@ -78,6 +78,18 @@ depend on someone remembering to. It reports only: the full output goes to
 checks would fail whenever the guest is simply switched off, and an alarm that
 cries wolf is ignored when it matters (Principle 23).
 
+### Exempting shebang files that are correct at 100644
+
+The shebang-vs-index-mode sweep (below) asks a question — "meant to run directly?"
+— and for sourced libraries and interpreter-invoked scripts the answer is a
+permanent no. Reporting the same ten files on every run trains the eye to skip the
+section, and then the eleventh, the real one, is skipped with it (Principle 23).
+Two exemptions: anything under a `lib/` directory is skipped without being listed,
+and `SMBG_SHEBANG_EXEMPT` in the configuration holds space-separated extended
+regexes matched against `<repo>:<path>` for the rest. The number of hits the
+exemptions absorbed is printed as its own `ok` line — an exemption wide enough to
+hide something shows up as a count that jumped (Principle 25).
+
 The deployed copy finds the repo through `SMBG_REPO` in the configuration; with
 the repo unreachable (mount down) the drift comparisons skip rather than fail.
 Since 1.4.0 it also sweeps the Layer 8 git operating contract: repo-local

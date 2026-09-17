@@ -138,6 +138,14 @@ SMBG_GUEST_ROOT="/srv/workspace"
 # session as a notification when one exists.
 #SMBG_SELFCHECK_INTERVAL=86400
 
+# Files the doctor's shebang-vs-index-mode sweep should not report: space-separated
+# extended regexes, each matched against "<repo path>:<file path in repo>". For
+# scripts that carry a shebang but are always invoked through an interpreter
+# (`python path/to/x.py`) and are therefore correct at 100644. Anything under a
+# lib/ directory is exempt without listing it. The doctor prints how many hits the
+# exemptions absorbed — if that number jumps, a pattern is wider than intended.
+#SMBG_SHEBANG_EXEMPT="skills/[^:]*/scripts/[^/]*\.py$"
+
 # Optional user hook to open in the owner's GUI session at wake. For things
 # unrelated to this system that you nonetheless want handled at wake time, such as
 # an app that mounts local volumes. It runs only if the path exists, and is a no-op

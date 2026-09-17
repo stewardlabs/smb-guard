@@ -394,9 +394,20 @@ Two essentials:
 
 ## Rollback
 
+Switching the system off while leaving every file in place — for establishing
+whether it is the cause of something. It is a toggle: the second block puts it
+back.
+
 ```bash
+sudo launchctl bootout system/<prefix>.selfcheck
 sudo launchctl bootout system/<prefix>.smb-guard
 sudo launchctl bootout system/<prefix>.sleepwatcher
+```
+
+```bash
+sudo launchctl bootstrap system /Library/LaunchDaemons/<prefix>.sleepwatcher.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/<prefix>.smb-guard.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/<prefix>.selfcheck.plist
 ```
 
 Guest:
@@ -408,3 +419,42 @@ sudo cp -a /etc/samba/smb.conf.bak-<timestamp> /etc/samba/smb.conf && sudo syste
 
 **Rolling back Samba restores `-8062`** — it only makes sense once a different cause
 has been established.
+
+## Uninstall
+
+Removing the deployment. The scripts mirror the install scripts one for one,
+and for the same reason a script exists at all: `host/install.sh` places thirteen
+files under five directories, and removing them by hand is precisely the
+"one is missed" failure — where the one that is missed is a LaunchDaemon that
+keeps firing.
+
+```bash
+./uninstall.sh --dry-run        # both plans, nothing removed
+./uninstall.sh                  # host (sudo) -> guest (ssh -t sudo)
+./uninstall.sh --host           # or one side at a time
+sudo ./host/uninstall.sh        # directly, on the host
+sudo ./guest/uninstall.sh       # directly, on the guest
+```
+
+Run `uninstall.sh` **as a normal user**, like `install.sh`. The host goes first —
+it removes the guard, the wake hook and the self-check, everything that would
+otherwise keep calling a guest that no longer has `clockfix`.
+
+Each side reads its **deployed** configuration first (`/usr/local/etc/smb-guard.conf`,
+`/etc/smb-guard.conf`) and only then the repo copy — the reverse of the install
+scripts. What has to be removed is what was deployed, under the label prefix and
+log directory that were in effect at the time.
+
+| Removed by the scripts | Left in place — the commands are printed at the end of each run |
+|---|---|
+| host: the three LaunchDaemons (booted out first), `/usr/local/sbin/{smb-guard,smb-guard-sleep,smb-guard-wakeup,smbfix,smb-guard-selfcheck,smb-guard-doctor}`, `/usr/local/lib/smb-guard/`, `/usr/local/etc/smb-guard.conf`, the newsyslog entry, `/var/run/smb-guard` | **the mount**: `/etc/auto_master`'s `/-` line, `/etc/auto_smb`, the `autofs.conf` keys, the mount point. The install never wrote them, the map holds credentials, and autofs keeps working without the guard |
+| guest: `mac-cruft-cleanup.timer` (stopped, disabled), the two units, `/usr/local/sbin/{clockfix,mac-cruft-cleanup}`, `/etc/sudoers.d/clockfix`, `/etc/smb-guard.conf` | **the share**: `/etc/samba/smb.conf` — the latest `.bak-<timestamp>` is named. Restoring it removes the share, so the Mac's mount comes down first |
+| | the log directory (evidence — `--purge-logs` removes it), Homebrew `sleepwatcher`, `DSDontWriteNetworkStores`, the share-root bind mount in fstab, chrony's `makestep.conf` |
+
+Each script ends with a verification pass over its own list and fails if anything
+of the deployment remains — after the host script there is no doctor left to ask.
+
+The order for a full teardown, when the workspace is leaving this pair of
+machines: `./uninstall.sh` → unmount and remove the autofs files on the Mac (the
+printed block) → restore `smb.conf` on the guest (the printed block). The mount
+must be gone before the share is.
