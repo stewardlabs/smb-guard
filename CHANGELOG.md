@@ -21,6 +21,40 @@ changing its meaning, and moving a deployment path, are major changes.
   side that cannot see it. Added the case, the distinction, and the guest-side
   remedies.
 
+## [1.7.0] — 2026-09-18
+
+### Added
+
+- **`uninstall.sh`, `host/uninstall.sh`, `guest/uninstall.sh` — the mirror of
+  the install trio.** `host/install.sh` places thirteen files under five
+  directories and removal was by hand, which is exactly the "one is missed"
+  failure this repo exists against — where the missed one is a LaunchDaemon
+  that keeps firing against a mount that is gone. Each script removes precisely
+  what its install counterpart placed, boots the jobs out before touching
+  files, reads the **deployed** configuration first (what has to be removed is
+  what was deployed), and ends with a verification pass over its own list —
+  after the host script there is no doctor left to ask. Neither side touches
+  the mount or the share: the autofs files hold the credentials and were never
+  written by the install, and restoring `smb.conf` removes a share the Mac may
+  still be mounting. Both are printed as commands for a human to sequence
+- **doctor: exemptions for the shebang-vs-index-mode sweep.** Sourced
+  libraries and interpreter-invoked scripts are correct at 100644, and
+  reporting the same ten on every run trains the eye to skip the section
+  (Principle 23). Anything under `lib/` is exempt without listing;
+  `SMBG_SHEBANG_EXEMPT` holds per-installation regexes. The absorbed count is
+  printed as its own `ok` line so a pattern that grew too wide shows up as a
+  number that jumped (Principle 25)
+
+### Fixed
+
+- **install.md 'Rollback' left the selfcheck job running.** It listed the two
+  original daemons only — 1.6.0 added a third and did not update the toggle.
+  The re-enable half is now written down too
+
+### Configuration
+
+- New optional key `SMBG_SHEBANG_EXEMPT` (empty by default)
+
 ## [1.6.0] — 2026-08-30
 
 ### Added

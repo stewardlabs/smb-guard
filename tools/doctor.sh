@@ -129,6 +129,7 @@ fi
 : "${SMBG_REPO:=}"
 : "${SMBG_AUTOFS_MAP:=auto_smb}"
 : "${SMBG_AUTOMOUNT_TIMEOUT:=604800}"
+: "${SMBG_SHEBANG_EXEMPT:=}"
 SMBG_SHARE_PATH="$SMBG_SHARE${SMBG_SHARE_SUBPATH:+/$SMBG_SHARE_SUBPATH}"
 
 # ── autofs desired state ───────────────────────────────────────────────────
@@ -771,6 +772,21 @@ fi
 # A shebang does not prove the file is meant to run directly — sourced
 # libraries and interpreter-invoked scripts legitimately stay 100644 — so this
 # is a WARN that leaves the intent question with the operator, not a FAIL.
+#
+# Two exemptions keep the WARN from becoming noise. A list that is the same ten
+# files on every run trains the eye to skip the section, and then the eleventh
+# — the real one — is skipped with it (Principle 23).
+#   built-in     anything under a lib/ directory: sourced by convention
+#   configured   SMBG_SHEBANG_EXEMPT — space-separated extended regexes matched
+#                against "<repo>:<path>", for the interpreter-invoked scripts an
+#                installation knows about
+# The number of exempted hits is printed as its own ok line, so an exemption
+# that has grown wide enough to hide things shows up as a count that jumped
+# (Principle 25 — silence must not mean two different things).
+SHEBANG_EXEMPT_RE='(^|/)lib/'
+for pat in $SMBG_SHEBANG_EXEMPT; do
+    SHEBANG_EXEMPT_RE="$SHEBANG_EXEMPT_RE|$pat"
+done
 if [ -z "$ssh_ctx" ] || [ -z "$ssh_out" ]; then
     skip "shebang-vs-index-mode sweep (no guest ssh)"
 elif [ -z "$SMBG_GUEST_ROOT" ]; then
@@ -784,12 +800,19 @@ else
     fi
     if [ "$sb" = "__SSH_FAILED__" ]; then
         skip "shebang-vs-index-mode sweep (guest ssh failed)"
-    elif [ -n "$sb" ]; then
-        warn "shebang files with index mode 100644 — authored on the Mac and meant to run directly? (sourced/interpreter-invoked files are fine as they are)" \
-             "if meant to run: git update-index --chmod=+x <path>, then chmod +x on the guest"
-        printf '%s\n' "$sb" | sed 's/^/        /'
     else
-        ok "no shebang files with index mode 100644"
+        n_all="$(printf '%s\n' "$sb" | grep -c . || true)"
+        sb="$(printf '%s\n' "$sb" | grep -Ev "$SHEBANG_EXEMPT_RE" || true)"
+        n_left="$(printf '%s\n' "$sb" | grep -c . || true)"
+        n_exempt=$((n_all - n_left))
+        if [ -n "$sb" ]; then
+            warn "shebang files with index mode 100644 — authored on the Mac and meant to run directly? (sourced/interpreter-invoked files are fine as they are)" \
+                 "if meant to run: git update-index --chmod=+x <path>, then chmod +x on the guest — or exempt via SMBG_SHEBANG_EXEMPT"
+            printf '%s\n' "$sb" | sed 's/^/        /'
+        else
+            ok "no shebang files with index mode 100644"
+        fi
+        [ "$n_exempt" -gt 0 ] && ok "$n_exempt shebang file(s) exempted (lib/ and SMBG_SHEBANG_EXEMPT)"
     fi
 fi
 
